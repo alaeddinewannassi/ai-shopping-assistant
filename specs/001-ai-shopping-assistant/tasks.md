@@ -31,9 +31,11 @@ built or demoed without a cart populated by US2.
       `backend/tests/{contract,integration,unit}`, `widget/src`, `widget/tests`, `docker/`
 - [x] T002 Initialize `backend/` as a Python 3.11 project (`pyproject.toml`/`requirements.txt`)
       with FastAPI, Pydantic, httpx, redis-py, pytest declared as dependencies
-- [ ] T003 [P] Initialize `widget/` as a minimal TypeScript project (bundler + test runner) for
-      the embeddable chat widget
-- [ ] T004 [P] Configure linting/formatting for backend (ruff/black) and widget (eslint/prettier)
+- [x] T003 [P] Initialize `widget/` as a minimal TypeScript project (bundler + test runner) for
+      the embeddable chat widget (Vite + Vitest/jsdom, builds to a single IIFE bundle)
+- [x] T004 [P] Configure linting/formatting for backend (ruff/black) and widget (eslint/prettier).
+      Backend: ruff (lint+format) already configured in pyproject.toml since T002. Widget:
+      eslint.config.js (@typescript-eslint) + .prettierrc.json added, both passing clean
 - [x] T005 Write `docker/docker-compose.yml` with services: `prestashop`, `mysql`, `redis`,
       `assistant-service`, wiring env vars (`PRESTASHOP_BASE_URL`, `PRESTASHOP_API_KEY`, `REDIS_URL`).
       NOTE: config-validated (`docker compose config`) but not yet run end-to-end in this
@@ -347,11 +349,13 @@ scenarios covered end-to-end.
 
 **Purpose**: Shopper-facing surface and cross-cutting hardening once all stories work.
 
-- [ ] T063 [P] Implement minimal embeddable chat widget in `widget/src/` (send/receive chat
+- [x] T063 [P] Implement minimal embeddable chat widget in `widget/src/` (send/receive chat
       turns against `POST /chat`, render recap/confirmation prompts distinctly from
-      read-only responses)
-- [ ] T064 [P] Widget smoke test in `widget/tests/` (renders, sends a message, displays a
-      response)
+      read-only responses). A single `<assistant-chat-widget>` custom element (Shadow DOM,
+      no framework), embeddable via one `<script>` tag against the built IIFE bundle
+- [x] T064 [P] Widget smoke test in `widget/tests/` (renders, sends a message, displays a
+      response) — also covers the confirm-vs-read-only visual distinction and a network
+      failure falling back to a friendly error message
 - [ ] T065 [P] Add `GET /health` readiness checks for adapter/Redis connectivity in
       `backend/src/api/chat.py`
 - [ ] T066 [P] Review all audit log call sites (T015 usages) for completeness against
