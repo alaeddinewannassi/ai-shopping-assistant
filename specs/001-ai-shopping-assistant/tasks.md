@@ -360,8 +360,12 @@ scenarios covered end-to-end.
       `backend/src/api/chat.py`. Also wired `_build_adapter()` to actually select
       `PrestaShopAdapter` when `PRESTASHOP_BASE_URL`/`PRESTASHOP_API_KEY` are set (T012
       landed after this was originally stubbed to always use `MockAdapter`)
-- [ ] T066 [P] Review all audit log call sites (T015 usages) for completeness against
-      FR-014 (every navigation/cart/promo/checkout action logged)
+- [x] T066 [P] Review all audit log call sites (T015 usages) for completeness against
+      FR-014 (every navigation/cart/promo/checkout action logged). Found and fixed 3 gaps:
+      unavailable-store refusals during update/remove-cart-line proposals were unlogged
+      (inconsistent with the equivalent add-to-cart branch), and `decline_pending_action`
+      logged only that a decline happened, not *what* action_type was declined — all three
+      covered by new regression tests in `tests/unit/test_audit_logging.py`
 - [ ] T067 Run and fix quickstart.md end-to-end walkthrough against the full Docker Compose
       stack; update quickstart.md with any corrections
 - [ ] T068 [P] Add README covering setup, running tests, and running the reference

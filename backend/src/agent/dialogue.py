@@ -185,9 +185,11 @@ def _handle_propose_cart_line_change(
 ) -> str:
     assert ctx.cart_handler is not None and ctx.pending_gate is not None
     session = ctx.session_store.get_or_create(session_id)
+    action_type = "propose_remove_from_cart" if remove else "propose_update_cart"
     try:
         cart = ctx.adapter.get_cart(_cart_id_for(session))
     except AdapterUnavailableError:
+        log_action(session_id, action_type, "get_cart", "unavailable")
         return (
             "I can't reach your cart right now, so I can't verify that change. "
             "Please try again in a moment."
@@ -195,6 +197,7 @@ def _handle_propose_cart_line_change(
 
     resolution = ctx.cart_handler.resolve_cart_line_reference(cart, raw_text)
     if resolution.kind == CartResolutionKind.UNAVAILABLE:
+        log_action(session_id, action_type, "get_product", "unavailable")
         return "I can't reach the store's catalog right now to verify that item. Please try again in a moment."
     if resolution.kind == CartResolutionKind.LINE_NOT_FOUND:
         return "I couldn't find that item in your cart — could you tell me its name?"
@@ -206,6 +209,7 @@ def _handle_propose_cart_line_change(
     try:
         product = ctx.adapter.get_product(line.product_id)
     except AdapterUnavailableError:
+        log_action(session_id, action_type, "get_product", "unavailable")
         return "I can't reach the store's catalog right now to verify that item. Please try again in a moment."
 
     if remove:
@@ -224,7 +228,7 @@ def _handle_propose_cart_line_change(
         )
     log_action(
         session_id,
-        "propose_remove_from_cart" if remove else "propose_update_cart",
+        action_type,
         "propose",
         "pending",
         details={"action_id": action.action_id},
@@ -330,6 +334,7 @@ def _describe_available_promos(ctx: DialogueContext, session_id: str, session: C
     try:
         cart = ctx.adapter.get_cart(_cart_id_for(session))
     except AdapterUnavailableError:
+        log_action(session_id, "apply_promo", "get_cart", "unavailable")
         return "I can't reach the store right now to check for promo codes. Please try again in a moment."
 
     if ctx.promo_rules and cart.lines and not cart.applied_promo_code:
@@ -442,8 +447,18 @@ def _handle_confirm(ctx: DialogueContext, session_id: str) -> str:
 
 def _handle_decline(ctx: DialogueContext, session_id: str) -> str:
     assert ctx.pending_gate is not None
+    session = ctx.session_store.get_or_create(session_id)
+    pending = session.pending_action
     ctx.pending_gate.decline(session_id)
-    log_action(session_id, "decline_pending_action", "decline", "declined")
+    if pending is None:
+        log_action(session_id, "decline_pending_action", "decline", "nothing_pending")
+    else:
+        # Record *what* was declined (not just that a decline happened) so the audit trail
+        # can reconstruct which proposed action never went through (FR-014).
+        log_action(
+            session_id, "decline_pending_action", "decline", "declined",
+            details={"action_id": pending.action_id, "declined_action_type": pending.action_type},
+        )
     return "No problem, I won't make that change. What would you like to do instead?"
 
 
