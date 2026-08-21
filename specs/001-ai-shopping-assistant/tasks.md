@@ -188,43 +188,43 @@ shopper confirms (per spec.md US2 Independent Test).
 
 ### Tests for User Story 2 ⚠️
 
-- [ ] T028 [P] [US2] Integration test "add-to-cart request produces confirmation, no mutation
+- [x] T028 [P] [US2] Integration test "add-to-cart request produces confirmation, no mutation
       yet" in `backend/tests/integration/test_us2_cart.py` (spec US2 Scenario 1)
-- [ ] T029 [P] [US2] Integration test "confirming adds the item; cart reflects it" in
+- [x] T029 [P] [US2] Integration test "confirming adds the item; cart reflects it" in
       `backend/tests/integration/test_us2_cart.py` (spec US2 Scenario 2)
-- [ ] T030 [P] [US2] Integration test "declining/changing leaves cart untouched, offers
+- [x] T030 [P] [US2] Integration test "declining/changing leaves cart untouched, offers
       corrected option" in `backend/tests/integration/test_us2_cart.py` (spec US2 Scenario 3)
-- [ ] T031 [P] [US2] Integration test "update quantity / remove line follows same
+- [x] T031 [P] [US2] Integration test "update quantity / remove line follows same
       confirm-before-mutate flow" in `backend/tests/integration/test_us2_cart.py` (spec US2
       Scenario 4)
-- [ ] T032 [P] [US2] Integration test "out-of-stock product reports unavailability + in-stock
+- [x] T032 [P] [US2] Integration test "out-of-stock product reports unavailability + in-stock
       alternatives, no mutation" in `backend/tests/integration/test_us2_cart.py` (spec US2
       Scenario 5)
-- [ ] T032a [P] [US2] Integration test "store backend unreachable when trying to
+- [x] T032a [P] [US2] Integration test "store backend unreachable when trying to
       add/update/remove a cart item → assistant plainly refuses, no `PendingAction` is
       created/confirmed, no mutation attempted" in `backend/tests/integration/
       test_us2_cart.py` (spec Edge Cases: backend unreachable, FR-016, research.md §8)
 
 ### Implementation for User Story 2
 
-- [ ] T033 [US2] Implement intent parsing for `propose_add_to_cart`,
+- [x] T033 [US2] Implement intent parsing for `propose_add_to_cart`,
       `propose_update_cart`, `propose_remove_from_cart`, `confirm_pending_action`,
       `decline_pending_action` in `backend/src/agent/intents.py`
-- [ ] T034 [US2] Implement recap text builder for cart-mutation `PendingAction`s in
+- [x] T034 [US2] Implement recap text builder for cart-mutation `PendingAction`s in
       `backend/src/agent/recap.py` (product, variant, quantity, unit price)
-- [ ] T035 [US2] Wire propose→confirm/decline flow in `backend/src/agent/dialogue.py`:
+- [x] T035 [US2] Wire propose→confirm/decline flow in `backend/src/agent/dialogue.py`:
       proposal creates a `PendingAction` (T014) with recap (T034); confirmation is the only
       path that calls `adapter.add_cart_item`/`update_cart_item`/`remove_cart_item`
       (wrapped by `resilience.py`, T009a)
-- [ ] T035a [US2] Handle `AdapterUnavailableError` on any cart mutation call in
+- [x] T035a [US2] Handle `AdapterUnavailableError` on any cart mutation call in
       `backend/src/agent/dialogue.py`: never create/confirm a `PendingAction` for the call
       in question, and reply plainly that the change can't be verified/applied right now —
       no cache fallback, no assumed success (FR-016, research.md §8)
-- [ ] T036 [US2] Handle `OutOfStockError` from the adapter by reporting unavailability +
+- [x] T036 [US2] Handle `OutOfStockError` from the adapter by reporting unavailability +
       suggesting alternatives (via `search_products`) instead of mutating (FR-015)
-- [ ] T037 [US2] Add audit logging (T015) for every proposed and executed cart mutation,
+- [x] T037 [US2] Add audit logging (T015) for every proposed and executed cart mutation,
       including declines (FR-014)
-- [ ] T038 [US2] Extend `POST /chat` in `backend/src/api/chat.py` to route
+- [x] T038 [US2] Extend `POST /chat` in `backend/src/api/chat.py` to route
       propose/confirm/decline turns through the dialogue layer
 
 **Checkpoint**: User Stories 1+2 together deliver "discover and build a cart conversationally,

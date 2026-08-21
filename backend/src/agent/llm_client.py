@@ -55,6 +55,10 @@ class RuleBasedStubClient:
     _DECLINE_PATTERNS = re.compile(r"\b(no|cancel|never mind|don't|stop)\b", re.I)
     _CHECKOUT_PATTERNS = re.compile(r"\b(checkout|check out|place my order)\b", re.I)
     _NAVIGATE_PATTERNS = re.compile(r"\b(take me to|go to|navigate to|show me the)\b", re.I)
+    _REMOVE_PATTERNS = re.compile(r"\bremove\b|\bdelete\b", re.I)
+    _UPDATE_PATTERNS = re.compile(
+        r"\bupdate\b|\bchange (?:the )?quantity\b|\bset (?:the )?quantity\b|\bmake it\b", re.I
+    )
     _ADD_PATTERNS = re.compile(r"\badd\b.*\bto\b.*\bcart\b|\badd\b", re.I)
 
     def parse_turn(self, message: str, context: dict) -> ActionCall:
@@ -68,6 +72,10 @@ class RuleBasedStubClient:
             return ActionCall(action_type="decline_pending_action")
         if self._NAVIGATE_PATTERNS.search(text):
             return ActionCall(action_type="navigate_to", parameters={"target": text})
+        if self._REMOVE_PATTERNS.search(text):
+            return ActionCall(action_type="propose_remove_from_cart", parameters={"raw_text": text})
+        if self._UPDATE_PATTERNS.search(text):
+            return ActionCall(action_type="propose_update_cart", parameters={"raw_text": text})
         if self._ADD_PATTERNS.search(text):
             return ActionCall(action_type="propose_add_to_cart", parameters={"raw_text": text})
 

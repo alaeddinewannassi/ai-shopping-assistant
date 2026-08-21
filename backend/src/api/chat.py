@@ -15,8 +15,8 @@ from pydantic import BaseModel
 
 from src.adapters.base import CommerceAdapter
 from src.adapters.mock import MockAdapter
-from src.agent.dialogue import handle_turn
-from src.agent.intents import DiscoveryIntentHandler
+from src.agent.dialogue import DialogueContext, handle_turn
+from src.agent.intents import CartIntentHandler, DiscoveryIntentHandler
 from src.agent.llm_client import RuleBasedStubClient, create_llm_client
 from src.agent.pending import PendingActionGate
 from src.agent.taxonomy_resolver import TaxonomyResolver
@@ -62,6 +62,15 @@ _llm_client = _build_llm_client()
 _taxonomy_resolver = TaxonomyResolver(_adapter)
 _catalog_cache = CatalogSnapshotCache()
 _discovery_handler = DiscoveryIntentHandler(_adapter, _taxonomy_resolver, _catalog_cache)
+_cart_handler = CartIntentHandler(_adapter)
+_dialogue_ctx = DialogueContext(
+    session_store=_session_store,
+    llm_client=_llm_client,
+    discovery_handler=_discovery_handler,
+    adapter=_adapter,
+    cart_handler=_cart_handler,
+    pending_gate=_pending_gate,
+)
 
 
 @app.get("/health")
@@ -73,9 +82,9 @@ def health() -> dict[str, str]:
 def chat(request: ChatRequest) -> ChatResponse:
     """Handles one conversational turn.
 
-    Discovery/navigation intents (US1) are fully wired via agent/dialogue.py. Cart/promo/
-    checkout intents (US2-US4) will be wired the same way as their user stories land; for
-    now they're acknowledged but not yet actionable.
+    Discovery/navigation (US1) and cart propose/confirm/decline (US2) intents are fully
+    wired via agent/dialogue.py. Checkout/promo intents (US3-US4) will be wired the same
+    way as their user stories land; for now they're acknowledged but not yet actionable.
     """
-    reply = handle_turn(_session_store, _llm_client, _discovery_handler, request.session_id, request.message)
+    reply = handle_turn(_dialogue_ctx, request.session_id, request.message)
     return ChatResponse(session_id=request.session_id, reply=reply)

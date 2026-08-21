@@ -9,7 +9,7 @@ import pytest
 
 from src.adapters.base import AttributeGroup, Category
 from src.adapters.mock import MockAdapter
-from src.agent.dialogue import handle_turn
+from src.agent.dialogue import DialogueContext, handle_turn
 from src.agent.intents import DiscoveryIntentHandler
 from src.agent.llm_client import RuleBasedStubClient
 from src.agent.taxonomy_resolver import TaxonomyResolver
@@ -32,9 +32,15 @@ def session_store() -> SessionStore:
     return SessionStore(redis_url=None)
 
 
-def _discovery_handler(adapter: MockAdapter) -> DiscoveryIntentHandler:
+def _ctx(adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore) -> DialogueContext:
     resolver = TaxonomyResolver(adapter)
-    return DiscoveryIntentHandler(adapter, resolver, CatalogSnapshotCache())
+    discovery_handler = DiscoveryIntentHandler(adapter, resolver, CatalogSnapshotCache())
+    return DialogueContext(
+        session_store=session_store,
+        llm_client=llm_client,
+        discovery_handler=discovery_handler,
+        adapter=adapter,
+    )
 
 
 # -- Scenario 1: category + price constraint search --------------------------- #
@@ -43,18 +49,14 @@ def _discovery_handler(adapter: MockAdapter) -> DiscoveryIntentHandler:
 def test_search_by_category_and_price_constraint_returns_matching_products(
     adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
 ) -> None:
-    reply = handle_turn(
-        session_store, llm_client, _discovery_handler(adapter), "s1", "show me jackets under $100"
-    )
+    reply = handle_turn(_ctx(adapter, llm_client, session_store), "s1", "show me jackets under $100")
     assert "Blue Jacket" in reply
 
 
 def test_search_by_category_and_price_constraint_excludes_out_of_range_products(
     adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
 ) -> None:
-    reply = handle_turn(
-        session_store, llm_client, _discovery_handler(adapter), "s1", "show me jackets under $50"
-    )
+    reply = handle_turn(_ctx(adapter, llm_client, session_store), "s1", "show me jackets under $50")
     assert "Blue Jacket" not in reply
     assert "couldn't find" in reply
 
@@ -65,9 +67,7 @@ def test_search_by_category_and_price_constraint_excludes_out_of_range_products(
 def test_navigate_to_named_category(
     adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
 ) -> None:
-    reply = handle_turn(
-        session_store, llm_client, _discovery_handler(adapter), "s2", "take me to the t-shirts category"
-    )
+    reply = handle_turn(_ctx(adapter, llm_client, session_store), "s2", "take me to the t-shirts category")
     assert "T-Shirts" in reply or "t-shirts" in reply.lower()
     assert "Classic T-Shirt" in reply
 
@@ -78,9 +78,7 @@ def test_navigate_to_named_category(
 def test_navigate_to_named_product(
     adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
 ) -> None:
-    reply = handle_turn(
-        session_store, llm_client, _discovery_handler(adapter), "s3", "go to Blue Jacket"
-    )
+    reply = handle_turn(_ctx(adapter, llm_client, session_store), "s3", "go to Blue Jacket")
     assert "Blue Jacket" in reply
 
 
@@ -95,9 +93,7 @@ def test_ambiguous_category_term_triggers_one_clarifying_question(
     # between two real categories — exercising ResolutionStatus.AMBIGUOUS end-to-end.
     adapter._categories["cat-rain-jackets"] = Category(id="cat-rain-jackets", name="Rain Jackets")
 
-    reply = handle_turn(
-        session_store, llm_client, _discovery_handler(adapter), "s4", "show me jackets"
-    )
+    reply = handle_turn(_ctx(adapter, llm_client, session_store), "s4", "show me jackets")
     assert "?" in reply
     assert reply.count("?") == 1  # at most one clarifying question (FR-003)
     assert "Jackets" in reply and "Rain Jackets" in reply
@@ -109,9 +105,7 @@ def test_ambiguous_category_term_triggers_one_clarifying_question(
 def test_no_matches_returns_plain_message_not_dead_end(
     adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
 ) -> None:
-    reply = handle_turn(
-        session_store, llm_client, _discovery_handler(adapter), "s5", "show me nonexistent gizmos"
-    )
+    reply = handle_turn(_ctx(adapter, llm_client, session_store), "s5", "show me nonexistent gizmos")
     assert "couldn't find" in reply
     assert "try" in reply.lower()
 
@@ -127,14 +121,14 @@ def test_no_matches_returns_plain_message_not_dead_end(
 def test_backend_unreachable_falls_back_to_cached_snapshot_with_disclaimer(
     adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
 ) -> None:
-    handler = _discovery_handler(adapter)
+    ctx = _ctx(adapter, llm_client, session_store)
 
     # Warm the cache with a successful live search first.
-    warm_up = handle_turn(session_store, llm_client, handler, "s6", "show me jackets")
+    warm_up = handle_turn(ctx, "s6", "show me jackets")
     assert "Blue Jacket" in warm_up
 
     adapter.simulate_outage(True)
-    reply = handle_turn(session_store, llm_client, handler, "s6", "show me jackets")
+    reply = handle_turn(ctx, "s6", "show me jackets")
 
     assert "may be outdated" in reply.lower() or "cached" in reply.lower()
     assert "Blue Jacket" in reply
@@ -143,10 +137,10 @@ def test_backend_unreachable_falls_back_to_cached_snapshot_with_disclaimer(
 def test_backend_unreachable_with_nothing_cached_gives_plain_unavailable_message(
     adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
 ) -> None:
-    handler = _discovery_handler(adapter)
+    ctx = _ctx(adapter, llm_client, session_store)
     adapter.simulate_outage(True)
 
-    reply = handle_turn(session_store, llm_client, handler, "s7", "show me completely new query xyz")
+    reply = handle_turn(ctx, "s7", "show me completely new query xyz")
 
     assert "can't reach" in reply.lower() or "can't search" in reply.lower()
     assert "Jacket" not in reply and "T-Shirt" not in reply  # never fabricate product data
