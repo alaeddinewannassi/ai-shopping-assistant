@@ -1,50 +1,80 @@
-# [PROJECT_NAME] Constitution
-<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
+# AI Shopping Assistant Constitution
 
 ## Core Principles
 
-### [PRINCIPLE_1_NAME]
-<!-- Example: I. Library-First -->
-[PRINCIPLE_1_DESCRIPTION]
-<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
+### I. Conversational-First, Frictionless UX
+The assistant is the primary way a shopper interacts with the store: it MUST be able to
+answer questions, recommend/filter products, and change navigation (search, category,
+product page) purely from natural-language turns. Every response MUST move the shopper
+closer to a decision (no dead-end answers). Latency for a conversational turn MUST stay
+within standard chat-assistant expectations (target: perceived response start < 2s).
 
-### [PRINCIPLE_2_NAME]
-<!-- Example: II. CLI Interface -->
-[PRINCIPLE_2_DESCRIPTION]
-<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
+### II. Platform-Agnostic Commerce Adapter
+All e-commerce platform integration (PrestaShop, or any other backend) MUST go through a
+single Commerce Adapter interface (catalog search, product detail, cart CRUD, promo/coupon
+validation, checkout/order creation). Core assistant logic MUST NOT contain
+platform-specific code (no direct PrestaShop Webservice/DB calls outside the adapter
+implementation). Adding a new platform MUST only require a new adapter implementation,
+never changes to assistant/dialogue logic. Reference/dev environment MUST be a
+containerized store (Docker Compose) so the adapter can be exercised end-to-end without a
+production dependency.
 
-### [PRINCIPLE_3_NAME]
-<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
-[PRINCIPLE_3_DESCRIPTION]
-<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
+### III. Explicit Confirmation Before Mutating Actions (NON-NEGOTIABLE)
+Any action that mutates shopper state — add/remove/update cart line, apply a promo code, or
+place an order — MUST be preceded by a clear recap (items, quantities, prices, discounts,
+total) and MUST NOT execute until the user explicitly confirms. Navigation changes
+(browsing, filtering, viewing a product) are read-only and do not require confirmation.
+Checkout is a distinct, final confirmation step separate from cart-edit confirmations.
 
-### [PRINCIPLE_4_NAME]
-<!-- Example: IV. Integration Testing -->
-[PRINCIPLE_4_DESCRIPTION]
-<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
+### IV. Test-First & Adapter Contract Testing (NON-NEGOTIABLE)
+Every Commerce Adapter method MUST have a contract test that runs against the dockerized
+reference store before it is considered done. Dialogue/agent behaviors (intent routing,
+recap generation, promo strategy selection) MUST have scenario-based tests written and
+reviewed before implementation (Red-Green-Refactor). No PR merges with failing contract or
+scenario tests.
 
-### [PRINCIPLE_5_NAME]
-<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
-[PRINCIPLE_5_DESCRIPTION]
-<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
+### V. Observability & Auditability of Agent Actions
+Every assistant-initiated action (navigation change, cart mutation, promo application,
+checkout) MUST be logged with: triggering user intent, action taken, adapter call(s) made,
+and outcome. Logs MUST be structured (JSON) and sufficient to reconstruct "why did the
+assistant do X" for support/debugging, without storing raw payment credentials or secrets.
 
-## [SECTION_2_NAME]
-<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
+### VI. Transparent, Rule-Based Promotion Strategy
+Promo code selection/eligibility logic MUST be deterministic and rule-based (e.g.
+cart-value thresholds, category/segment targeting, stackability rules), fully described in
+the feature spec/plan, and never fabricated or guessed by the assistant. The assistant MUST
+only offer codes that pass the platform's own validation (via the adapter) — it MUST NOT
+claim a discount is applied unless the adapter confirms it. No dark patterns: discounts
+MUST be explained in the recap, and the shopper MUST be able to decline them.
 
-[SECTION_2_CONTENT]
-<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
+## Technology & Integration Constraints
 
-## [SECTION_3_NAME]
-<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
+- Reference e-commerce backend runs via Docker (e.g., official PrestaShop image) so the
+  full flow (search → cart → promo → checkout) is testable locally/CI without touching a
+  live store.
+- The Commerce Adapter interface is the only integration seam; a "generic/mock adapter"
+  MUST exist for fast tests independent of the Docker store.
+- Conversation/dialogue state (current cart draft, pending confirmation, navigation
+  context) is tracked explicitly and MUST be inspectable for debugging.
+- Secrets (store API keys/tokens) MUST be provided via environment/config, never hard-coded
+  or logged.
 
-[SECTION_3_CONTENT]
-<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
+## Development Workflow
+
+- Features are developed spec-first using Spec Kit: `/speckit-specify` →
+  (`/speckit-clarify`) → `/speckit-plan` → `/speckit-tasks` → `/speckit-implement`.
+- Each user-facing capability (navigation, add-to-cart, recap/checkout, promo strategy)
+  ships as an independently testable user story/slice per the spec template.
+- Quality gates before merge: adapter contract tests pass against the Docker reference
+  store, scenario tests for dialogue behaviors pass, and no mutating action is reachable
+  without a confirmation step.
 
 ## Governance
-<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
 
-[GOVERNANCE_RULES]
-<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
+This constitution supersedes ad-hoc practices for this project. Amendments require an
+updated version, a documented rationale, and re-validation of in-flight specs/plans against
+the changed principle(s). All specs, plans, and task lists MUST be checked for compliance
+with these principles before implementation begins; unjustified complexity or a bypassed
+confirmation step MUST be flagged and resolved before merge.
 
-**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
-<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
+**Version**: 1.0.0 | **Ratified**: 2026-08-21 | **Last Amended**: 2026-08-21
