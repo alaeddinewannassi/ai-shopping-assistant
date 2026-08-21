@@ -356,8 +356,10 @@ scenarios covered end-to-end.
 - [x] T064 [P] Widget smoke test in `widget/tests/` (renders, sends a message, displays a
       response) — also covers the confirm-vs-read-only visual distinction and a network
       failure falling back to a friendly error message
-- [ ] T065 [P] Add `GET /health` readiness checks for adapter/Redis connectivity in
-      `backend/src/api/chat.py`
+- [x] T065 [P] Add `GET /health` readiness checks for adapter/Redis connectivity in
+      `backend/src/api/chat.py`. Also wired `_build_adapter()` to actually select
+      `PrestaShopAdapter` when `PRESTASHOP_BASE_URL`/`PRESTASHOP_API_KEY` are set (T012
+      landed after this was originally stubbed to always use `MockAdapter`)
 - [ ] T066 [P] Review all audit log call sites (T015 usages) for completeness against
       FR-014 (every navigation/cart/promo/checkout action logged)
 - [ ] T067 Run and fix quickstart.md end-to-end walkthrough against the full Docker Compose

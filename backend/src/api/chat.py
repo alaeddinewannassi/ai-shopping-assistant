@@ -13,7 +13,7 @@ import os
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from src.adapters.base import CommerceAdapter
+from src.adapters.base import AdapterUnavailableError, CommerceAdapter
 from src.adapters.mock import MockAdapter
 from src.agent.dialogue import DialogueContext, handle_turn
 from src.agent.intents import CartIntentHandler, DiscoveryIntentHandler, PromoIntentHandler
@@ -38,11 +38,13 @@ class ChatResponse(BaseModel):
 
 
 def _build_adapter() -> CommerceAdapter:
-    """Returns the configured CommerceAdapter.
+    """Returns the configured CommerceAdapter: PrestaShopAdapter (T012) once
+    PRESTASHOP_BASE_URL/PRESTASHOP_API_KEY are set (backend/.env.example), else MockAdapter
+    for local/dev/test runs with no store configured."""
+    if os.environ.get("PRESTASHOP_BASE_URL") and os.environ.get("PRESTASHOP_API_KEY"):
+        from src.adapters.prestashop import PrestaShopAdapter
 
-    Defaults to MockAdapter for local/dev/test runs; swap to PrestaShopAdapter once T012
-    is implemented and PRESTASHOP_BASE_URL/PRESTASHOP_API_KEY are set (backend/.env.example).
-    """
+        return PrestaShopAdapter()
     return MockAdapter()
 
 
@@ -78,9 +80,41 @@ _dialogue_ctx = DialogueContext(
 )
 
 
+def _check_redis() -> str:
+    """T065: reports live Redis reachability, distinct from "not configured" — SessionStore
+    silently falls back to an in-memory store in both cases, so /health is the only place
+    this distinction is surfaced (research.md §8 gap noted in T066's audit review)."""
+    redis_url = os.environ.get("REDIS_URL")
+    if not redis_url:
+        return "not_configured"
+    try:
+        import redis as redis_lib
+
+        client = redis_lib.from_url(redis_url, decode_responses=True, socket_connect_timeout=2)
+        client.ping()
+        return "ok"
+    except Exception:  # noqa: BLE001 - readiness check must never raise, only report
+        return "unavailable"
+
+
+def _check_adapter() -> str:
+    """T065: a cheap read-only call proves the configured CommerceAdapter can actually
+    reach its store right now, not just that it was constructed successfully at startup."""
+    try:
+        _adapter.list_categories()
+        return "ok"
+    except AdapterUnavailableError:
+        return "unavailable"
+    except Exception:  # noqa: BLE001 - readiness check must never raise, only report
+        return "unavailable"
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    redis_status = _check_redis()
+    adapter_status = _check_adapter()
+    overall = "ok" if adapter_status == "ok" and redis_status != "unavailable" else "degraded"
+    return {"status": overall, "adapter": adapter_status, "redis": redis_status}
 
 
 @app.post("/chat", response_model=ChatResponse)
