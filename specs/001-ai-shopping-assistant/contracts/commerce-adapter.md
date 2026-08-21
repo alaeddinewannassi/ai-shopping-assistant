@@ -12,14 +12,40 @@ below against the dockerized PrestaShop reference store (plus the Mock, for fast
 - **Output**: list of `Product` (see data-model.md), possibly empty.
 - **Contract**:
   - MUST NOT mutate any store state (read-only).
-  - MUST reflect current store stock/price at call time (no caching beyond the request).
+  - MUST reflect current store stock/price at call time (no caching *inside the adapter*
+    itself — any Catalog Snapshot fallback caching happens one layer up, in the agent/session
+    layer, per research.md §8, only after this call fails).
   - Empty result set MUST return `[]`, never raise, so the dialogue layer can respond
     gracefully (spec Edge Cases: "no catalog matches").
+  - On a genuine transport/timeout failure (store unreachable), MUST raise
+    `AdapterUnavailableError` rather than returning `[]` — the caller needs to distinguish
+    "no results" from "couldn't ask" to decide whether a stale-data disclaimer is warranted
+    (spec FR-016).
 
 ## `get_product(product_id: str) -> Product`
 
 - **Contract**: read-only; raises a typed `ProductNotFoundError` if the id doesn't exist,
-  which the dialogue layer maps to "product no longer available" (spec Edge Cases).
+  which the dialogue layer maps to "product no longer available" (spec Edge Cases); raises
+  `AdapterUnavailableError` on transport/timeout failure (see research.md §8) — distinct
+  from `ProductNotFoundError`, since one means "the store said no such product" and the
+  other means "couldn't reach the store to check."
+
+## `list_categories() -> list[Category]`
+
+- **Contract**: read-only; returns the store's real, current category tree (id, name,
+  parent_id). Backs the `TaxonomyResolver` (contracts/taxonomy-resolver.md, research.md §9)
+  — MUST NOT be used directly by the dialogue layer or the LLM as a search filter source;
+  it only feeds the cached `TaxonomySnapshot` (data-model.md) that the resolver consults.
+  Raises `AdapterUnavailableError` on transport/timeout failure, same as other read-only
+  methods; on failure with no existing `TaxonomySnapshot` cached yet, taxonomy resolution
+  degrades to `unsupported` (plain-text fallback only) rather than blocking discovery
+  entirely.
+
+## `list_attributes() -> list[AttributeGroup]`
+
+- **Contract**: read-only; returns the store's real, current attribute groups and the
+  values actually in use (e.g., group "Color" → `["Red", "Burgundy", "Blue"]`). Same caching/
+  resolver/failure semantics as `list_categories()` above.
 
 ## `get_cart(session_id: str) -> Cart`
 
@@ -80,6 +106,22 @@ below against the dockerized PrestaShop reference store (plus the Mock, for fast
     "checkout")` — enforced by the agent layer, verified in integration tests, not by this
     adapter method itself.
 
+## Behavior when the store is unreachable (all methods)
+
+Any `CommerceAdapter` method MUST raise `AdapterUnavailableError` on a genuine
+transport/timeout failure (distinguishing "couldn't ask the store" from a normal business
+error like `ProductNotFoundError`). Per research.md §8, the agent layer's response differs
+by call type — **this is agent-layer behavior, not adapter behavior**, but adapters must
+raise consistently so the agent layer can tell the two failure kinds apart:
+
+- Read-only methods (`search_products`, `get_product`, `get_cart`): agent layer may fall
+  back to a cached Catalog Snapshot for display, clearly labeled as possibly outdated.
+- Mutating methods (`add_cart_item`, `update_cart_item`, `remove_cart_item`,
+  `validate_promo`, `apply_promo`, `checkout`): agent layer MUST NOT fall back to any cache
+  or assume success — it refuses the action and tells the shopper it cannot currently verify
+  live store data. No `PendingAction` is created/confirmed while `AdapterUnavailableError` is
+  being raised for the relevant call.
+
 ## Error Types (shared vocabulary across adapters)
 
 | Error | Raised by | Meaning |
@@ -88,6 +130,11 @@ below against the dockerized PrestaShop reference store (plus the Mock, for fast
 | `OutOfStockError` | add/update_cart_item | Requested quantity/variant unavailable |
 | `PromoInvalidError` | apply_promo | Code not valid at apply time |
 | `CartStateChangedError` | checkout | Cart state changed since last read; re-recap required |
+| `AdapterUnavailableError` | any method | Transport/timeout failure reaching the store — distinct from the store validly saying "no"; see research.md §8 for the read-vs-mutate fallback rules |
 
 Contract tests MUST assert both the "happy path" return shape and that each error type is
-raised under the documented condition, for every adapter implementation.
+raised under the documented condition, for every adapter implementation. `AdapterUnavailableError`
+specifically should be exercised by simulating a store outage (e.g., pointing the adapter at
+an unreachable URL/short timeout) and asserting no mutation occurs and no cached data is
+returned in place of a real mutation result.
+

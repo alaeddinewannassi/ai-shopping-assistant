@@ -40,7 +40,10 @@ built or demoed without a cart populated by US2.
       (2+ categories, 1+ product with variants, 1 out-of-stock product) and demo cart rules
       (`WELCOME10`, `BIGCART15`) per quickstart.md
 - [ ] T007 [P] Create `backend/.env.example` documenting `PRESTASHOP_BASE_URL`,
-      `PRESTASHOP_API_KEY`, `REDIS_URL` (never commit real secrets)
+      `PRESTASHOP_API_KEY`, `REDIS_URL`, and `LLM_PROVIDER` (default `free-tier-hosted` |
+      `rule-based-stub` | `hosted-paid`) + `LLM_API_KEY` (a free Groq/Gemini free-tier key
+      for the default; `rule-based-stub` needs no key at all) per research.md §3a (never
+      commit real secrets)
 
 **Checkpoint**: Repo builds/lints; `docker compose up` brings up all services (PrestaShop may
 still need manual first-run install per quickstart.md).
@@ -58,19 +61,31 @@ this phase is complete**, per Constitution Principles II, III, and V.
       per data-model.md
 - [ ] T009 Define the `CommerceAdapter` interface (Protocol/ABC) in
       `backend/src/adapters/base.py` with all methods and error types from
-      `contracts/commerce-adapter.md` (`search_products`, `get_product`, `get_cart`,
-      `add_cart_item`, `update_cart_item`, `remove_cart_item`, `validate_promo`,
-      `apply_promo`, `checkout`; `ProductNotFoundError`, `OutOfStockError`,
-      `PromoInvalidError`, `CartStateChangedError`)
+      `contracts/commerce-adapter.md` (`search_products`, `get_product`, `list_categories`,
+      `list_attributes`, `get_cart`, `add_cart_item`, `update_cart_item`,
+      `remove_cart_item`, `validate_promo`, `apply_promo`, `checkout`;
+      `ProductNotFoundError`, `OutOfStockError`, `PromoInvalidError`,
+      `CartStateChangedError`, `AdapterUnavailableError`)
+- [ ] T009a [P] Implement the resilience wrapper in `backend/src/adapters/resilience.py`
+      per research.md §8: short timeout + limited retry + simple circuit breaker around any
+      `CommerceAdapter` call, normalizing transport/timeout failures into
+      `AdapterUnavailableError` (never masking it as a business error like
+      `ProductNotFoundError`)
 - [ ] T010 [P] Implement `MockAdapter` in `backend/src/adapters/mock.py` (in-memory catalog/
-      cart/promo/order state) satisfying the full `CommerceAdapter` contract, for fast tests
+      cart/promo/order state) satisfying the full `CommerceAdapter` contract, for fast
+      tests, including a test-only mode to simulate `AdapterUnavailableError` on demand
 - [ ] T011 [P] Contract test suite in `backend/tests/contract/test_adapter_contract.py`,
       parametrized to run against both `MockAdapter` and `PrestaShopAdapter` (skips
       PrestaShop cases if the Docker store isn't reachable), covering every method/error in
-      `contracts/commerce-adapter.md`
+      `contracts/commerce-adapter.md`, including `AdapterUnavailableError` on a simulated
+      outage (e.g., unreachable URL/short timeout) for both read and mutating methods
 - [ ] T012 Implement `PrestaShopAdapter` in `backend/src/adapters/prestashop.py` using
       httpx against the PrestaShop Webservice REST API (products, categories, carts,
       cart_rules, orders resources), satisfying T011's contract tests
+- [ ] T012a [P] Implement `CatalogSnapshot` cache in `backend/src/session/catalog_cache.py`
+      per data-model.md: Redis-backed, short TTL, keyed by search query/filters or product
+      id, read/write helpers only — this module MUST NOT be imported by any cart/promo/
+      checkout code path (enforced by a unit test asserting no such import exists)
 - [ ] T013 [P] Implement `ConversationSession` + `PendingAction` models and Redis-backed
       store in `backend/src/session/store.py` per data-model.md (get/create session,
       read/write pending action, TTL for abandoned sessions)
@@ -78,6 +93,15 @@ this phase is complete**, per Constitution Principles II, III, and V.
       `propose(action_type, parameters, recap_text)`, `confirm()`, `decline()`, and a
       staleness check (re-validate if store state changed since `created_at`) — this is the
       single choke point through which any mutating adapter call may be reached
+- [ ] T014a [P] Implement the swappable `LLMClient` abstraction in
+      `backend/src/agent/llm_client.py` per research.md §3a: a common interface (turn text +
+      fixed action schema → structured action call) with three selectable implementations
+      chosen via `LLM_PROVIDER` — `FreeTierHostedLLMClient` (**default**; free-tier
+      OpenAI-compatible tool-calling API such as Groq or Gemini's free tier, needs a free
+      `LLM_API_KEY`), `RuleBasedStubClient` (free deterministic keyword matcher, used for
+      automated tests so the suite runs with zero LLM cost/dependency), and
+      `HostedPaidLLMClient` (stubbed only — for a possible future production upgrade, out of
+      scope for this internship deliverable)
 - [ ] T015 [P] Implement structured JSON audit logging in `backend/src/logging/audit.py`
       (timestamp, session id, intent, action, adapter result summary, outcome) and wire a
       helper the agent layer will call for every navigation/cart/promo/checkout action
@@ -86,6 +110,10 @@ this phase is complete**, per Constitution Principles II, III, and V.
 - [ ] T017 [P] Unit tests for the pending-action state machine in
       `backend/tests/unit/test_pending.py`: no mutation reachable without `confirmed=True`;
       staleness invalidation creates a fresh pending action
+- [ ] T017a [P] Unit tests for `RuleBasedStubClient` in
+      `backend/tests/unit/test_llm_client.py`: covers the full fixed action vocabulary
+      (research.md §3) deterministically with zero external calls, and a provider-selection
+      test verifying `LLM_PROVIDER` correctly instantiates each client type
 
 **Checkpoint**: Foundation ready — adapter contract passes against Mock (and PrestaShop once
 available), pending-action gate is unit-tested, audit logging and session store work. User
@@ -113,19 +141,31 @@ dependency (per spec.md US1 Independent Test).
 - [ ] T021 [P] [US1] Integration test "no catalog matches → plain message + alternatives, no
       dead-end navigation" in `backend/tests/integration/test_us1_discovery.py` (spec US1
       Scenario 4)
+- [ ] T021a [P] [US1] Integration test "store backend unreachable during discovery → falls
+      back to cached Catalog Snapshot with a clear 'may be outdated' disclaimer (or a plain
+      'can't search right now' message if nothing is cached yet)" in
+      `backend/tests/integration/test_us1_discovery.py` (spec Edge Cases: backend
+      unreachable, FR-016, research.md §8)
 
 ### Implementation for User Story 1
 
 - [ ] T022 [US1] Implement intent parsing for discovery/navigation actions
       (`search_products`, `navigate_to`) in `backend/src/agent/intents.py`, using
-      tool-calling against the fixed action vocabulary from research.md §3
+      `LLMClient` (T014a) against the fixed action vocabulary from research.md §3 — works
+      against any configured provider, including the free `rule-based-stub`
 - [ ] T023 [US1] Implement ambiguity detection + single clarifying-question generation in
       `backend/src/agent/intents.py` (max one question, per spec FR-003)
 - [ ] T024 [US1] Implement navigation-context tracking (update
       `ConversationSession.navigation_context`) in `backend/src/agent/dialogue.py`
 - [ ] T025 [US1] Wire discovery/navigation turns end-to-end in
-      `backend/src/agent/dialogue.py`: intent → `adapter.search_products`/`get_product` →
-      response, with audit logging (T015) for every navigation change (FR-014)
+      `backend/src/agent/dialogue.py`: intent → `adapter.search_products`/`get_product`
+      (wrapped by `resilience.py`, T009a) → response, with audit logging (T015) for every
+      navigation change (FR-014)
+- [ ] T025a [US1] Implement degraded-mode handling for discovery reads in
+      `backend/src/agent/dialogue.py`: on `AdapterUnavailableError`, attempt
+      `catalog_cache.py` (T012a) lookup and reply with results plus an explicit
+      "may be outdated" disclaimer; if no snapshot exists, reply plainly that search is
+      temporarily unavailable — never fabricate product data (FR-016, research.md §8)
 - [ ] T026 [US1] Handle empty-result and not-found cases gracefully (friendly message +
       alternatives) in `backend/src/agent/dialogue.py` (FR-015 partial — discovery-time
       unavailability)
@@ -160,6 +200,10 @@ shopper confirms (per spec.md US2 Independent Test).
 - [ ] T032 [P] [US2] Integration test "out-of-stock product reports unavailability + in-stock
       alternatives, no mutation" in `backend/tests/integration/test_us2_cart.py` (spec US2
       Scenario 5)
+- [ ] T032a [P] [US2] Integration test "store backend unreachable when trying to
+      add/update/remove a cart item → assistant plainly refuses, no `PendingAction` is
+      created/confirmed, no mutation attempted" in `backend/tests/integration/
+      test_us2_cart.py` (spec Edge Cases: backend unreachable, FR-016, research.md §8)
 
 ### Implementation for User Story 2
 
@@ -171,6 +215,11 @@ shopper confirms (per spec.md US2 Independent Test).
 - [ ] T035 [US2] Wire propose→confirm/decline flow in `backend/src/agent/dialogue.py`:
       proposal creates a `PendingAction` (T014) with recap (T034); confirmation is the only
       path that calls `adapter.add_cart_item`/`update_cart_item`/`remove_cart_item`
+      (wrapped by `resilience.py`, T009a)
+- [ ] T035a [US2] Handle `AdapterUnavailableError` on any cart mutation call in
+      `backend/src/agent/dialogue.py`: never create/confirm a `PendingAction` for the call
+      in question, and reply plainly that the change can't be verified/applied right now —
+      no cache fallback, no assumed success (FR-016, research.md §8)
 - [ ] T036 [US2] Handle `OutOfStockError` from the adapter by reporting unavailability +
       suggesting alternatives (via `search_products`) instead of mutating (FR-015)
 - [ ] T037 [US2] Add audit logging (T015) for every proposed and executed cart mutation,

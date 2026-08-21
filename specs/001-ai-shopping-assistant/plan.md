@@ -16,15 +16,24 @@ validated by the underlying store before being reflected in totals. A lightweigh
 chat widget provides the shopper-facing surface; a backend agent service owns dialogue state,
 the adapter layer, the promo strategy engine, and structured audit logging.
 
+**Project context**: This is an internship/academic deliverable, not a paid production
+deployment — the plan intentionally favors **free-tier** options (LLM provider, hosting,
+reference store) so it is realistic to build and demo without any billing setup, while
+keeping the same interfaces/architecture a real production deployment would use.
+
 ## Technical Context
 
 **Language/Version**: Python 3.11 (backend agent/adapter service); TypeScript (embeddable
 chat widget, frontend)
 
-**Primary Dependencies**: FastAPI + Pydantic (service/API layer), an LLM tool-calling
-runtime for intent parsing and dialogue orchestration (model-agnostic via a thin function-
-calling abstraction), httpx (PrestaShop Webservice REST client), redis-py (session/pending-
-action state)
+**Primary Dependencies**: FastAPI + Pydantic (service/API layer), a swappable `LLMClient`
+abstraction for intent parsing/dialogue orchestration selected via `LLM_PROVIDER` — default
+`free-tier-hosted` (a free-tier tool-calling API such as Groq or Gemini's free tier — real
+conversational quality, $0 cost within normal demo usage), with `rule-based-stub` (free,
+deterministic, used for automated tests) as an alternative, and `hosted-paid` reserved for a
+possible future production upgrade (see research.md §3a); httpx (PrestaShop Webservice REST
+client), redis-py (session/pending-action state)
+
 
 **Storage**: Redis for ephemeral conversation session state (navigation context, cart draft,
 pending confirmation); PrestaShop's own MySQL database remains the sole source of truth for
@@ -48,8 +57,15 @@ calls to the underlying store < 500ms p95 under nominal load
 
 **Constraints**: Zero silent mutations — every cart/promo/checkout mutation MUST pass
 through an explicit pending-action confirmation gate, enforced in code and covered by tests;
-fully reproducible offline dev/test environment (no dependency on a live/production store);
-secrets (store API keys) via environment/config only
+the LLM's tool-calling schema MUST NOT include any mutation adapter method at all (read-only
++ propose-only tools only) — the confirmation gate is a structural capability boundary, not
+a prompt instruction (research.md §9.3); fully reproducible offline dev/test environment (no
+dependency on a live/production store); secrets (store API keys) via environment/config
+only; when the store backend is unreachable, read-only browsing may degrade to a
+clearly-labeled cached Catalog Snapshot but no mutation may ever be served from cache or
+assumed to have succeeded (research.md §8, FR-016); free-text category/attribute terms MUST
+be resolved against the store's real taxonomy via a deterministic resolver before being used
+as a search filter — never asserted from LLM guesswork alone (research.md §9, FR-017)
 
 **Scale/Scope**: MVP scope is a single storefront, single currency/locale, tens of
 concurrent shopper sessions; multi-store/multi-currency explicitly out of scope (per spec
@@ -93,19 +109,33 @@ backend/
 ├── src/
 │   ├── adapters/          # Commerce Adapter interface (Protocol/ABC) + PrestaShopAdapter + MockAdapter
 │   │   ├── base.py        # CommerceAdapter interface: search_products, get_product,
-│   │   │                  #   cart get/add/update/remove, validate_promo, apply_promo, checkout
+│   │   │                  #   list_categories, list_attributes, cart get/add/update/remove,
+│   │   │                  #   validate_promo, apply_promo, checkout
+│   │   ├── resilience.py  # Circuit breaker + AdapterUnavailableError wrapper around adapter calls
 │   │   ├── prestashop.py  # PrestaShop Webservice REST implementation
 │   │   └── mock.py        # In-memory adapter for fast unit/scenario tests
 │   ├── agent/             # Dialogue orchestration
-│   │   ├── intents.py     # Natural-language intent parsing → structured actions
-│   │   ├── pending.py     # Pending-action state machine (propose → confirm/decline → execute)
+│   │   ├── llm_client.py  # Swappable LLM provider abstraction (free-tier-hosted/local/rule-based-stub via LLM_PROVIDER)
+│   │   ├── intents.py     # Natural-language intent parsing → structured actions (uses llm_client);
+│   │   │                  #   tool schema exposed to the LLM is read-only + propose_action ONLY —
+│   │   │                  #   no mutation adapter method is ever LLM-callable (research.md §9.3)
+│   │   ├── taxonomy_resolver.py  # Deterministic term→real-taxonomy resolver (exact/ambiguous/
+│   │   │                  #   unsupported/stale) backing FR-017; never LLM/embedding-based (research.md §9.1)
+│   │   ├── pending.py     # Pending-action state machine (propose → confirm/decline → execute);
+│   │   │                  #   confirm_action() is the ONLY code path that may call a mutation
+│   │   │                  #   adapter method, and is not itself an LLM-callable tool (research.md §9.3)
 │   │   ├── recap.py       # Cart/checkout recap builder
 │   │   └── dialogue.py    # Turn handling, ties intents + pending state + adapter + promo together
 │   ├── promo/
 │   │   ├── strategy.py    # Rule definitions (spend threshold, first-order, category-specific, stackability)
 │   │   └── engine.py      # Evaluates cart/session against strategy rules → suggested code(s)
 │   ├── session/
-│   │   └── store.py       # Redis-backed Conversation Session (nav context, cart draft, pending action)
+│   │   ├── store.py       # Redis-backed Conversation Session (nav context, cart draft, pending action)
+│   │   ├── catalog_cache.py  # Redis-backed CatalogSnapshot: read-only fallback cache for discovery/navigation
+│   │   │                  #   when the adapter is unreachable (research.md §8); never used for cart/promo/checkout
+│   │   └── taxonomy_cache.py  # Redis-backed TaxonomySnapshot: real category/attribute vocabulary cache
+│   │                      #   used by taxonomy_resolver.py (research.md §9.1-9.2); distinct purpose from
+│   │                      #   catalog_cache.py (that one is outage-only; this one is always-on grounding)
 │   ├── logging/
 │   │   └── audit.py       # Structured JSON audit logging for every navigation/cart/promo/checkout action
 │   └── api/

@@ -126,7 +126,61 @@ The structural gate implementing Principle III.
 matching `action_type`/`parameters` exists and `confirmed == True` at the moment of
 execution; if store state (price/stock/promo) has changed since `created_at`, the action is
 invalidated and a fresh `PendingAction` (with updated recap) MUST be created instead (FR-009,
-US3 Scenario 4).
+US3 Scenario 4). For any cart-mutation `action_type`, `parameters` MUST include a concrete
+`product_id`/`variant_id` resolved from a known `search_products`/`get_product` result — a
+`PendingAction` MUST NOT be created from an ambiguous reference ("the red one") without that
+resolution step first narrowing it to one item (FR-019, research.md §9.4); the action is
+also invalidated (not reused) the moment the conversation moves on to a different product/
+variant/quantity, so a later bare "yes" can only confirm the most recent, still-relevant
+proposal.
+
+## CatalogSnapshot (owned by this feature, Redis-backed, ephemeral cache)
+
+Read-only fallback cache used only when the Commerce Adapter raises
+`AdapterUnavailableError` for a discovery/navigation call (research.md §8, FR-016). Never
+consulted for cart, promo, or checkout decisions.
+
+| Field | Type | Notes |
+|---|---|---|
+| cache_key | string | Derived from the search query/filters or product id it caches |
+| products | list[Product] | Last successfully fetched result for that key |
+| fetched_at | datetime | When this snapshot was captured |
+| ttl_seconds | int | Short TTL (a few minutes); expired entries are treated as absent, not served |
+
+**Validation rules**: A `CatalogSnapshot` MUST only ever be returned to a shopper alongside
+an explicit "this may be outdated" disclaimer (FR-016); it MUST NOT be written to or read by
+any code path that also touches `Cart`, `PromoCode`, or `Order` — the cache exists purely to
+keep read-only browsing responsive during a transient outage, not to approximate live
+commerce state.
+
+## TaxonomySnapshot (owned by this feature, Redis-backed, short-TTL cache)
+
+Distinct from `CatalogSnapshot` (outage fallback) — this cache exists for *normal-operation*
+grounding of free-text terms against the store's real vocabulary (FR-017, research.md §9),
+regardless of whether the adapter is currently reachable.
+
+| Field | Type | Notes |
+|---|---|---|
+| categories | list[Category] | id, name, parent_id — from `list_categories()` |
+| attribute_groups | list[AttributeGroup] | group name → list of real attribute values in use, from `list_attributes()` |
+| synonym_table | dict[str, str] | Small curated per-store alias map (e.g. "tee" → "T-Shirts"); maintained outside the LLM, editable config, not learned |
+| fetched_at | datetime | When this snapshot was last refreshed |
+| ttl_seconds | int | Short TTL; on expiry, refreshed opportunistically on next resolution call |
+
+**Validation rules**: A `TaxonomySnapshot` MUST only ever be consulted by the
+`TaxonomyResolver` (contracts/taxonomy-resolver.md) to produce a `ResolutionResult`; it is
+never shown to the shopper directly and never treated as proof that a specific product/
+variant combination exists or is in stock — only the live `search_products`/`get_product`
+result is authoritative for that (research.md §9.2).
+
+### ResolutionResult (transient, not persisted — returned in-process by TaxonomyResolver)
+
+| Field | Type | Notes |
+|---|---|---|
+| status | enum | `exact` \| `ambiguous` \| `unsupported` \| `stale` |
+| resolved_id | string \| null | Set only when `status == "exact"` |
+| candidates | list[{id, display_label}] | Set when `status == "ambiguous"` |
+| snapshot_age_seconds | int | Age of the `TaxonomySnapshot` used, for `stale`-triggered refresh logic |
 
 ## Commerce Adapter Binding (owned by this feature, config)
 
