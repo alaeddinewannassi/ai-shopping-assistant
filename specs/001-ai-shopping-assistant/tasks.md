@@ -368,7 +368,7 @@ scenarios covered end-to-end.
       covered by new regression tests in `tests/unit/test_audit_logging.py`
 - [ ] T067 Run and fix quickstart.md end-to-end walkthrough against the full Docker Compose
       stack; update quickstart.md with any corrections
-- [ ] T068 [P] Add README covering setup, running tests, and running the reference
+- [x] T068 [P] Add README covering setup, running tests, and running the reference
       environment (links to quickstart.md)
 
 **Checkpoint**: Feature is demoable end-to-end via the widget against the dockerized
