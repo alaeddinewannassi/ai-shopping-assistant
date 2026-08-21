@@ -79,9 +79,14 @@ this phase is complete**, per Constitution Principles II, III, and V.
       PrestaShop cases if the Docker store isn't reachable), covering every method/error in
       `contracts/commerce-adapter.md`, including `AdapterUnavailableError` on a simulated
       outage (e.g., unreachable URL/short timeout) for both read and mutating methods
-- [ ] T012 Implement `PrestaShopAdapter` in `backend/src/adapters/prestashop.py` using
+- [x] T012 Implement `PrestaShopAdapter` in `backend/src/adapters/prestashop.py` using
       httpx against the PrestaShop Webservice REST API (products, categories, carts,
-      cart_rules, orders resources), satisfying T011's contract tests
+      cart_rules, orders resources), satisfying T011's contract tests. NOTE: written from
+      PrestaShop's official webservice docs but not yet integration-tested against a live
+      store in this environment (Docker daemon unavailable) — run `docker compose up` +
+      `pytest tests/contract/test_adapter_contract_prestashop.py` to validate before
+      trusting it against a real deployment; see the module docstring for the highest-risk
+      areas (combination/attribute resolution, order creation prerequisites)
 - [x] T012a [P] Implement `CatalogSnapshot` cache in `backend/src/session/catalog_cache.py`
       per data-model.md: Redis-backed, short TTL, keyed by search query/filters or product
       id, read/write helpers only — this module MUST NOT be imported by any cart/promo/

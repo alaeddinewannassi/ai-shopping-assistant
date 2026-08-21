@@ -1,8 +1,11 @@
 """Contract tests for CommerceAdapter (contracts/commerce-adapter.md, T011).
 
-Parametrized to run against every registered adapter implementation. PrestaShopAdapter
-cases are skipped automatically if the Docker reference store isn't reachable (see
-conftest.py fixtures once PrestaShopAdapter exists, T012).
+Exercises the full contract against MockAdapter (fast, always runs). PrestaShopAdapter is
+covered separately in test_adapter_contract_prestashop.py (T012): its outage-simulation
+mechanism (an unreachable URL) differs enough from MockAdapter's `simulate_outage()` toggle
+that sharing test bodies via one parametrized fixture would mean either adapter's tests
+silently calling a method the other doesn't have, so each gets its own file instead, both
+asserting the same contract.
 """
 
 from __future__ import annotations
