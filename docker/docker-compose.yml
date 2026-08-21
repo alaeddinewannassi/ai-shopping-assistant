@@ -1,0 +1,67 @@
+services:
+  mysql:
+    image: mysql:8.0
+    command: --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-prestashop_root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-prestashop}
+      MYSQL_USER: ${MYSQL_USER:-prestashop}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-prestashop}
+    volumes:
+      - prestashop_db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-prestashop_root}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  prestashop:
+    image: prestashop/prestashop:8-apache
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      DB_SERVER: mysql
+      DB_NAME: ${MYSQL_DATABASE:-prestashop}
+      DB_USER: ${MYSQL_USER:-prestashop}
+      DB_PASSWD: ${MYSQL_PASSWORD:-prestashop}
+      PS_DOMAIN: ${PS_DOMAIN:-localhost:8080}
+      PS_FOLDER_ADMIN: ${PS_FOLDER_ADMIN:-admin}
+      PS_FOLDER_INSTALL: ${PS_FOLDER_INSTALL:-install}
+      PS_INSTALL_AUTO: ${PS_INSTALL_AUTO:-1}
+      PS_ENABLE_SSL: 0
+      PS_HANDLE_DYNAMIC_DOMAIN: 1
+      ADMIN_MAIL: ${PS_ADMIN_EMAIL:-demo@example.com}
+      ADMIN_PASSWD: ${PS_ADMIN_PASSWORD:-AssistantDemo123!}
+    ports:
+      - "8080:80"
+    volumes:
+      - prestashop_data:/var/www/html
+      - ./prestashop:/tmp/fixtures:ro
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  assistant-service:
+    build:
+      context: ../backend
+    depends_on:
+      - prestashop
+      - redis
+    environment:
+      PRESTASHOP_BASE_URL: http://prestashop/api
+      REDIS_URL: redis://redis:6379/0
+    env_file:
+      - path: ../backend/.env
+        required: false
+    ports:
+      - "8000:8000"
+
+volumes:
+  prestashop_db:
+  prestashop_data:
+  redis_data:

@@ -34,9 +34,13 @@ built or demoed without a cart populated by US2.
 - [ ] T003 [P] Initialize `widget/` as a minimal TypeScript project (bundler + test runner) for
       the embeddable chat widget
 - [ ] T004 [P] Configure linting/formatting for backend (ruff/black) and widget (eslint/prettier)
-- [ ] T005 Write `docker/docker-compose.yml` with services: `prestashop`, `mysql`, `redis`,
-      `assistant-service`, wiring env vars (`PRESTASHOP_BASE_URL`, `PRESTASHOP_API_KEY`, `REDIS_URL`)
-- [ ] T006 [P] Add `docker/prestashop/` fixture notes + a seed script/checklist for demo catalog
+- [x] T005 Write `docker/docker-compose.yml` with services: `prestashop`, `mysql`, `redis`,
+      `assistant-service`, wiring env vars (`PRESTASHOP_BASE_URL`, `PRESTASHOP_API_KEY`, `REDIS_URL`).
+      NOTE: config-validated (`docker compose config`) but not yet run end-to-end in this
+      environment (Docker daemon unavailable) — see docker/prestashop/README.md for the
+      manual Admin steps (Webservice key, cart rules, checkout customer/address/carrier)
+      still required after `docker compose up` before the stack is fully usable
+- [x] T006 [P] Add `docker/prestashop/` fixture notes + a seed script/checklist for demo catalog
       (2+ categories, 1+ product with variants, 1 out-of-stock product) and demo cart rules
       (`WELCOME10`, `BIGCART15`) per quickstart.md
 - [x] T007 [P] Create `backend/.env.example` documenting `PRESTASHOP_BASE_URL`,
