@@ -10,7 +10,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.adapters.base import AdapterUnavailableError, CommerceAdapter, OutOfStockError
+from src.adapters.base import (
+    AdapterUnavailableError,
+    CartStateChangedError,
+    CommerceAdapter,
+    OutOfStockError,
+)
 from src.agent.intents import (
     CartIntentHandler,
     CartResolution,
@@ -24,6 +29,7 @@ from src.agent.pending import PendingActionError, PendingActionGate
 from src.agent.recap import (
     build_add_to_cart_recap,
     build_cart_summary,
+    build_checkout_recap,
     build_remove_cart_recap,
     build_update_cart_recap,
 )
@@ -106,6 +112,16 @@ def _record_navigation(
 
 def _cart_id_for(session: ConversationSession) -> str:
     return session.cart_id or session.session_id
+
+
+def _products_by_id_for_cart(ctx: DialogueContext, cart) -> dict:
+    products_by_id = {}
+    for line in cart.lines:
+        try:
+            products_by_id[line.product_id] = ctx.adapter.get_product(line.product_id)
+        except Exception:  # noqa: BLE001 - best-effort display name lookup only
+            continue
+    return products_by_id
 
 
 def _handle_propose_add_to_cart(ctx: DialogueContext, session_id: str, raw_text: str) -> str:
@@ -210,6 +226,62 @@ def _handle_propose_cart_line_change(
     return f"{recap} (reply 'yes' to confirm or 'no' to cancel)"
 
 
+def _handle_request_checkout(ctx: DialogueContext, session_id: str) -> str:
+    """T045: builds the full checkout recap and proposes the `checkout` PendingAction, or
+    short-circuits with no recap at all if the cart is empty (spec Edge Cases)."""
+    assert ctx.pending_gate is not None
+    session = ctx.session_store.get_or_create(session_id)
+    try:
+        cart = ctx.adapter.get_cart(_cart_id_for(session))
+    except AdapterUnavailableError:
+        log_action(session_id, "request_checkout", "get_cart", "unavailable")
+        return (
+            "I can't reach the store right now, so I can't start checkout. "
+            "Please try again in a moment."
+        )
+
+    if not cart.lines:
+        log_action(session_id, "request_checkout", "checkout", "empty_cart")
+        return "Your cart is empty — want to keep browsing? I can help you find something."
+
+    recap = build_checkout_recap(cart, _products_by_id_for_cart(ctx, cart))
+    action = ctx.pending_gate.propose(session_id, "checkout", {}, recap)
+    log_action(session_id, "request_checkout", "propose", "pending", details={"action_id": action.action_id})
+    return f"{recap} Shall I place the order? (reply 'yes' to confirm or 'no' to cancel)"
+
+
+def _handle_checkout_state_changed(ctx: DialogueContext, session_id: str) -> str:
+    """FR-009 / US3 Scenario 4: cart/stock/price/promo changed between recap and
+    confirmation. Re-validates against the store and requires a fresh confirmation instead
+    of retrying blindly or silently placing a mismatched order."""
+    assert ctx.pending_gate is not None
+    session = ctx.session_store.get_or_create(session_id)
+    try:
+        cart = ctx.adapter.get_cart(_cart_id_for(session))
+    except AdapterUnavailableError:
+        log_action(session_id, "confirm_pending_action", "checkout", "unavailable")
+        return "I can't reach the store right now to re-check your cart. Please try again shortly."
+
+    if not cart.lines:
+        log_action(session_id, "confirm_pending_action", "checkout", "cart_state_changed_empty")
+        return (
+            "Your cart changed (it's now empty) since I last showed you the recap, so I "
+            "can't place that order. Want to keep browsing?"
+        )
+
+    recap = build_checkout_recap(cart, _products_by_id_for_cart(ctx, cart))
+    action = ctx.pending_gate.propose(session_id, "checkout", {}, recap)
+    log_action(
+        session_id, "confirm_pending_action", "checkout", "cart_state_changed",
+        details={"action_id": action.action_id},
+    )
+    return (
+        "Something changed in your cart since I last showed you this (stock, price, or "
+        f"promo) — here's the updated recap: {recap} Shall I place the order? "
+        "(reply 'yes' to confirm or 'no' to cancel)"
+    )
+
+
 def _handle_confirm(ctx: DialogueContext, session_id: str) -> str:
     assert ctx.pending_gate is not None
     session = ctx.session_store.get_or_create(session_id)
@@ -233,18 +305,24 @@ def _handle_confirm(ctx: DialogueContext, session_id: str) -> str:
     except OutOfStockError:
         log_action(session_id, "confirm_pending_action", "confirm", "out_of_stock")
         return "Sorry, that item just went out of stock, so I couldn't complete that change."
+    except CartStateChangedError:
+        # FR-009 / US3 Scenario 4: re-validate and require a fresh confirmation instead of
+        # retrying blindly or silently placing a mismatched order.
+        return _handle_checkout_state_changed(ctx, session_id)
 
     log_action(session_id, "confirm_pending_action", "confirm", "success")
+
+    if pending.action_type == "checkout":
+        assert result.order is not None
+        order = result.order
+        return (
+            f"Order placed! Your order id is {order.id}. "
+            f"Total charged: ${order.grand_total:.2f}. Thank you for shopping with us!"
+        )
+
     if result.cart is None:
         return "Done!"
-
-    products_by_id = {}
-    for line in result.cart.lines:
-        try:
-            products_by_id[line.product_id] = ctx.adapter.get_product(line.product_id)
-        except Exception:  # noqa: BLE001 - best-effort display name lookup only
-            continue
-    return build_cart_summary(result.cart, products_by_id)
+    return build_cart_summary(result.cart, _products_by_id_for_cart(ctx, result.cart))
 
 
 def _handle_decline(ctx: DialogueContext, session_id: str) -> str:
@@ -289,6 +367,9 @@ def handle_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         return _handle_propose_cart_line_change(
             ctx, session_id, action.parameters.get("raw_text", message), remove=True
         )
+
+    if action.action_type == "request_checkout" and ctx.pending_gate:
+        return _handle_request_checkout(ctx, session_id)
 
     if action.action_type == "confirm_pending_action" and ctx.pending_gate:
         return _handle_confirm(ctx, session_id)

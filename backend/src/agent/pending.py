@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from src.adapters.base import Cart, CommerceAdapter
+from src.adapters.base import Cart, CommerceAdapter, Order
 from src.session.store import PendingAction, SessionStore
 
 # Mutation types this state machine gates. Every one of these MUST have gone through
@@ -32,6 +32,7 @@ MUTATING_ACTION_TYPES = {
 class ActionResult:
     action_type: str
     cart: Optional[Cart] = None
+    order: Optional[Order] = None
     error: Optional[str] = None
 
 
@@ -80,6 +81,9 @@ class PendingActionGate:
             )
 
         try:
+            if action.action_type == "checkout":
+                order = self._adapter.checkout(self._cart_id_for(session_id))
+                return ActionResult(action_type=action.action_type, order=order)
             cart = self._execute(session_id, action)
             return ActionResult(action_type=action.action_type, cart=cart)
         finally:
@@ -87,10 +91,13 @@ class PendingActionGate:
             # later stray "yes" can't re-trigger or retry it silently.
             self._sessions.clear_pending_action(session_id)
 
+    def _cart_id_for(self, session_id: str) -> str:
+        session = self._sessions.get_or_create(session_id)
+        return session.cart_id or session_id
+
     def _execute(self, session_id: str, action: PendingAction) -> Optional[Cart]:
         params = action.parameters
-        session = self._sessions.get_or_create(session_id)
-        cart_id = session.cart_id or session_id
+        cart_id = self._cart_id_for(session_id)
 
         if action.action_type == "add_cart_item":
             return self._adapter.add_cart_item(
@@ -102,9 +109,6 @@ class PendingActionGate:
             return self._adapter.remove_cart_item(cart_id, params["variant_id"])
         if action.action_type == "apply_promo":
             return self._adapter.apply_promo(cart_id, params["code"])
-        if action.action_type == "checkout":
-            self._adapter.checkout(cart_id)
-            return None
 
         raise ValueError(f"Unhandled mutating action type: {action.action_type}")
 

@@ -243,34 +243,34 @@ spec.md US3 Independent Test).
 
 ### Tests for User Story 3 ⚠️
 
-- [ ] T039 [P] [US3] Integration test "checkout request produces full recap (lines, qty,
+- [x] T039 [P] [US3] Integration test "checkout request produces full recap (lines, qty,
       price, discounts, total) + asks for final confirmation" in
       `backend/tests/integration/test_us3_checkout.py` (spec US3 Scenario 1)
-- [ ] T040 [P] [US3] Integration test "final confirmation places order, returns order id" in
+- [x] T040 [P] [US3] Integration test "final confirmation places order, returns order id" in
       `backend/tests/integration/test_us3_checkout.py` (spec US3 Scenario 2)
-- [ ] T041 [P] [US3] Integration test "requesting a change instead of confirming re-enters
+- [x] T041 [P] [US3] Integration test "requesting a change instead of confirming re-enters
       US2 flow and re-presents a fresh recap before allowing checkout again" in
       `backend/tests/integration/test_us3_checkout.py` (spec US3 Scenario 3)
-- [ ] T042 [P] [US3] Integration test "stock/price/promo changes between recap and
+- [x] T042 [P] [US3] Integration test "stock/price/promo changes between recap and
       confirmation trigger re-validation + fresh confirmation, no mismatched order" in
       `backend/tests/integration/test_us3_checkout.py` (spec US3 Scenario 4, FR-009)
-- [ ] T043 [P] [US3] Integration test "checkout with empty cart informs shopper, offers to
+- [x] T043 [P] [US3] Integration test "checkout with empty cart informs shopper, offers to
       resume discovery, no recap shown" (spec Edge Cases: empty-cart checkout)
 
 ### Implementation for User Story 3
 
-- [ ] T044 [US3] Implement full recap builder (lines, qty, unit price, discounts, grand
+- [x] T044 [US3] Implement full recap builder (lines, qty, unit price, discounts, grand
       total) for the `checkout` `PendingAction` in `backend/src/agent/recap.py`
       (extends T034)
-- [ ] T045 [US3] Implement `request_checkout` intent + empty-cart short-circuit in
+- [x] T045 [US3] Implement `request_checkout` intent + empty-cart short-circuit in
       `backend/src/agent/intents.py` / `dialogue.py`
-- [ ] T046 [US3] Wire final-confirmation path in `backend/src/agent/dialogue.py`: only a
+- [x] T046 [US3] Wire final-confirmation path in `backend/src/agent/dialogue.py`: only a
       confirmed `checkout` `PendingAction` calls `adapter.checkout(cart_id)`
-- [ ] T047 [US3] Handle `CartStateChangedError` from `adapter.checkout` by invalidating the
+- [x] T047 [US3] Handle `CartStateChangedError` from `adapter.checkout` by invalidating the
       pending action and re-presenting a fresh recap (FR-009) instead of retrying blindly
-- [ ] T048 [US3] Add audit logging (T015) for checkout recap presentation, confirmation,
+- [x] T048 [US3] Add audit logging (T015) for checkout recap presentation, confirmation,
       decline/edit, and final order outcome (FR-014)
-- [ ] T049 [US3] Extend `POST /chat` in `backend/src/api/chat.py` to route
+- [x] T049 [US3] Extend `POST /chat` in `backend/src/api/chat.py` to route
       checkout/final-confirmation turns through the dialogue layer
 
 **Checkpoint**: Full core loop (discover → cart → checkout) is demoable end-to-end against

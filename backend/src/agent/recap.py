@@ -47,3 +47,24 @@ def build_cart_summary(cart: Cart, products_by_id: dict[str, Product]) -> str:
         parts.append(f"{line.quantity} x {name} (${line.line_total:.2f})")
     summary = "; ".join(parts)
     return f"Your cart now has: {summary}. Subtotal: ${cart.subtotal:.2f}."
+
+
+def build_checkout_recap(cart: Cart, products_by_id: dict[str, Product]) -> str:
+    """Full pre-order recap for the `checkout` PendingAction (T044): every line item,
+    quantity, unit price, any applied discount, and the grand total (spec FR-007)."""
+    parts = []
+    for line in cart.lines:
+        product = products_by_id.get(line.product_id)
+        name = product.name if product else line.product_id
+        parts.append(
+            f"{line.quantity} x {name} @ ${line.unit_price:.2f} each (${line.line_total:.2f})"
+        )
+    lines_text = "; ".join(parts)
+    discount_text = ""
+    if cart.discount_total:
+        code_text = f" (code {cart.applied_promo_code})" if cart.applied_promo_code else ""
+        discount_text = f" Discount{code_text}: -${cart.discount_total:.2f}."
+    return (
+        f"Here's your order recap: {lines_text}. Subtotal: ${cart.subtotal:.2f}."
+        f"{discount_text} Grand total: ${cart.grand_total:.2f}."
+    )
