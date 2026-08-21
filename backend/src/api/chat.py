@@ -13,11 +13,14 @@ import os
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from src.adapters.base import AdapterUnavailableError, CommerceAdapter
+from src.adapters.base import CommerceAdapter
 from src.adapters.mock import MockAdapter
+from src.agent.dialogue import handle_turn
+from src.agent.intents import DiscoveryIntentHandler
 from src.agent.llm_client import RuleBasedStubClient, create_llm_client
 from src.agent.pending import PendingActionGate
-from src.logging.audit import log_action
+from src.agent.taxonomy_resolver import TaxonomyResolver
+from src.session.catalog_cache import CatalogSnapshotCache
 from src.session.store import SessionStore
 
 app = FastAPI(title="AI Shopping Assistant", version="0.1.0")
@@ -56,6 +59,9 @@ _adapter = _build_adapter()
 _session_store = SessionStore()
 _pending_gate = PendingActionGate(_session_store, _adapter)
 _llm_client = _build_llm_client()
+_taxonomy_resolver = TaxonomyResolver(_adapter)
+_catalog_cache = CatalogSnapshotCache()
+_discovery_handler = DiscoveryIntentHandler(_adapter, _taxonomy_resolver, _catalog_cache)
 
 
 @app.get("/health")
@@ -65,34 +71,11 @@ def health() -> dict[str, str]:
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest) -> ChatResponse:
-    """Placeholder turn handler.
+    """Handles one conversational turn.
 
-    Full dialogue logic (search/navigate/propose/confirm flows across US1-US4) lives in
-    agent/dialogue.py once implemented (T022+). For now this demonstrates the wiring: intent
-    parsing -> a read-only adapter call for search intents, with graceful
-    AdapterUnavailableError handling per FR-016/research.md §8.
+    Discovery/navigation intents (US1) are fully wired via agent/dialogue.py. Cart/promo/
+    checkout intents (US2-US4) will be wired the same way as their user stories land; for
+    now they're acknowledged but not yet actionable.
     """
-    action = _llm_client.parse_turn(request.message, context={})
-
-    if action.action_type == "search_products":
-        try:
-            products = _adapter.search_products(query=action.parameters.get("query", ""))
-            log_action(request.session_id, action.action_type, "search_products", "success")
-            if not products:
-                reply = "I couldn't find anything matching that — want to try a different search?"
-            else:
-                names = ", ".join(p.name for p in products[:5])
-                reply = f"Here's what I found: {names}"
-        except AdapterUnavailableError:
-            log_action(request.session_id, action.action_type, "search_products", "unavailable")
-            reply = (
-                "I can't reach the store's catalog right now, so I can't search reliably. "
-                "Please try again in a moment."
-            )
-    else:
-        reply = (
-            f"(Recognized intent: {action.action_type} — full handling for this intent is "
-            f"implemented as part of its user story, see tasks.md.)"
-        )
-
+    reply = handle_turn(_session_store, _llm_client, _discovery_handler, request.session_id, request.message)
     return ChatResponse(session_id=request.session_id, reply=reply)

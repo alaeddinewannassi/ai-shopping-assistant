@@ -54,6 +54,7 @@ class RuleBasedStubClient:
     _CONFIRM_PATTERNS = re.compile(r"\b(yes|confirm|do it|go ahead|place the order)\b", re.I)
     _DECLINE_PATTERNS = re.compile(r"\b(no|cancel|never mind|don't|stop)\b", re.I)
     _CHECKOUT_PATTERNS = re.compile(r"\b(checkout|check out|place my order)\b", re.I)
+    _NAVIGATE_PATTERNS = re.compile(r"\b(take me to|go to|navigate to|show me the)\b", re.I)
     _ADD_PATTERNS = re.compile(r"\badd\b.*\bto\b.*\bcart\b|\badd\b", re.I)
 
     def parse_turn(self, message: str, context: dict) -> ActionCall:
@@ -65,6 +66,8 @@ class RuleBasedStubClient:
             return ActionCall(action_type="confirm_pending_action")
         if self._DECLINE_PATTERNS.search(text):
             return ActionCall(action_type="decline_pending_action")
+        if self._NAVIGATE_PATTERNS.search(text):
+            return ActionCall(action_type="navigate_to", parameters={"target": text})
         if self._ADD_PATTERNS.search(text):
             return ActionCall(action_type="propose_add_to_cart", parameters={"raw_text": text})
 
