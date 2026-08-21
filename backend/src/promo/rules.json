@@ -1,0 +1,16 @@
+[
+  {
+    "rule_id": "welcome-first-order",
+    "condition": "first_order and subtotal > 0",
+    "target_code": "WELCOME10",
+    "priority": 5,
+    "stackable_with": []
+  },
+  {
+    "rule_id": "big-cart",
+    "condition": "subtotal >= 100",
+    "target_code": "BIGCART15",
+    "priority": 10,
+    "stackable_with": []
+  }
+]

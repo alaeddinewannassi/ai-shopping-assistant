@@ -289,44 +289,44 @@ total after store validation (per spec.md US4 Independent Test).
 
 ### Tests for User Story 4 ⚠️
 
-- [ ] T050 [P] [US4] Unit tests for the promo rule engine (`evaluate`) in
+- [x] T050 [P] [US4] Unit tests for the promo rule engine (`evaluate`) in
       `backend/tests/unit/test_promo_engine.py`: single match, no match, multiple
       matching/stackable rules, multiple matching/exclusive rules → priority resolution
       (contracts/promo-strategy.md)
-- [ ] T051 [P] [US4] Integration test "cart matches a rule → assistant proactively suggests
+- [x] T051 [P] [US4] Integration test "cart matches a rule → assistant proactively suggests
       the applicable code with benefit explanation" in
       `backend/tests/integration/test_us4_promo.py` (spec US4 Scenario 1)
-- [ ] T052 [P] [US4] Integration test "shopper accepts suggestion → store-validated before
+- [x] T052 [P] [US4] Integration test "shopper accepts suggestion → store-validated before
       reflected in recap/total" in `backend/tests/integration/test_us4_promo.py` (spec US4
       Scenario 2)
-- [ ] T053 [P] [US4] Integration test "shopper declines suggestion → no code applied,
+- [x] T053 [P] [US4] Integration test "shopper declines suggestion → no code applied,
       original total stands" in `backend/tests/integration/test_us4_promo.py` (spec US4
       Scenario 3)
-- [ ] T054 [P] [US4] Integration test "shopper-provided code validated same way; invalid/
+- [x] T054 [P] [US4] Integration test "shopper-provided code validated same way; invalid/
       expired/ineligible reported clearly" in `backend/tests/integration/test_us4_promo.py`
       (spec US4 Scenario 4)
-- [ ] T055 [P] [US4] Integration test "no rule matches → assistant honestly reports no
+- [x] T055 [P] [US4] Integration test "no rule matches → assistant honestly reports no
       discount available" in `backend/tests/integration/test_us4_promo.py` (spec US4
       Scenario 5)
 
 ### Implementation for User Story 4
 
-- [ ] T056 [P] [US4] Define `PromoStrategyRule` config format (YAML/JSON) + loader in
+- [x] T056 [P] [US4] Define `PromoStrategyRule` config format (YAML/JSON) + loader in
       `backend/src/promo/strategy.py` per data-model.md/contracts/promo-strategy.md
-- [ ] T057 [US4] Implement the rule engine `evaluate()` in `backend/src/promo/engine.py`
+- [x] T057 [US4] Implement the rule engine `evaluate()` in `backend/src/promo/engine.py`
       (pure function: cart + session_context + rules → ordered suggestions), per
       contracts/promo-strategy.md
-- [ ] T058 [US4] Wire proactive suggestion flow in `backend/src/agent/dialogue.py`: call
+- [x] T058 [US4] Wire proactive suggestion flow in `backend/src/agent/dialogue.py`: call
       `engine.evaluate()`, then `adapter.validate_promo()` before surfacing any suggestion to
       the shopper (never surface an unvalidated candidate)
-- [ ] T059 [US4] Implement `apply_promo` intent handling: shopper acceptance creates an
+- [x] T059 [US4] Implement `apply_promo` intent handling: shopper acceptance creates an
       `apply_promo` `PendingAction`; confirmation is the only path calling
       `adapter.apply_promo()`
-- [ ] T060 [US4] Implement manual/shopper-provided promo code path (bypasses engine,
+- [x] T060 [US4] Implement manual/shopper-provided promo code path (bypasses engine,
       goes straight to `validate_promo` → propose → confirm → `apply_promo`)
-- [ ] T061 [US4] Add audit logging (T015) for every suggestion shown/declined and every
+- [x] T061 [US4] Add audit logging (T015) for every suggestion shown/declined and every
       validate/apply outcome (FR-014)
-- [ ] T062 [US4] Extend checkout recap (T044) to include any applied promo discount and
+- [x] T062 [US4] Extend checkout recap (T044) to include any applied promo discount and
       final total reflecting store-confirmed values only
 
 **Checkpoint**: All four user stories independently functional; full spec acceptance

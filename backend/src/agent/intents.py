@@ -21,6 +21,7 @@ from src.adapters.base import (
     CommerceAdapter,
     Product,
     ProductNotFoundError,
+    PromoValidation,
     Variant,
 )
 from src.agent.taxonomy_resolver import Candidate, ResolutionStatus, TaxonomyResolver
@@ -346,3 +347,50 @@ class CartIntentHandler:
         if len(candidates) == 1:
             return candidates[0]
         return None
+
+
+# --------------------------------------------------------------------------- #
+# User Story 4 - promo code intent resolution (T059, T060)
+# --------------------------------------------------------------------------- #
+
+_PROMO_CODE_PATTERN = re.compile(r"\b([A-Za-z]+\d+)\b")
+
+
+class PromoResolutionKind(str, Enum):
+    RESOLVED = "resolved"
+    INVALID = "invalid"
+    NO_CODE_GIVEN = "no_code_given"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass
+class PromoResolution:
+    kind: PromoResolutionKind
+    code: Optional[str] = None
+    validation: Optional[PromoValidation] = None
+
+
+class PromoIntentHandler:
+    """Resolves a shopper's promo-code turn — either a manually-provided code (T060) or a
+    shopper accepting a proactively-suggested one — the same way in both cases: straight to
+    `adapter.validate_promo()` (contracts/promo-strategy.md "Manually-provided codes"). The
+    engine (`promo/engine.py`) is never consulted here; it only drives proactive
+    suggestions (T058), which are surfaced as plain text, not through this handler."""
+
+    def __init__(self, adapter: CommerceAdapter) -> None:
+        self._adapter = adapter
+
+    def resolve_apply_promo(self, cart_id: str, raw_text: str) -> PromoResolution:
+        match = _PROMO_CODE_PATTERN.search(raw_text)
+        if match is None:
+            return PromoResolution(kind=PromoResolutionKind.NO_CODE_GIVEN)
+
+        code = match.group(1).upper()
+        try:
+            validation = self._adapter.validate_promo(cart_id, code)
+        except AdapterUnavailableError:
+            return PromoResolution(kind=PromoResolutionKind.UNAVAILABLE)
+
+        if not validation.valid:
+            return PromoResolution(kind=PromoResolutionKind.INVALID, code=code, validation=validation)
+        return PromoResolution(kind=PromoResolutionKind.RESOLVED, code=code, validation=validation)

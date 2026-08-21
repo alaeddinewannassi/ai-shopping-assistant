@@ -44,6 +44,10 @@ class ConversationSession:
     pending_action: Optional[PendingAction] = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    # US4/data-model.md PromoStrategy `first_order` signal: this shopper session has not
+    # yet completed a checkout. Flipped once by dialogue.py after a successful order — this
+    # feature has no account/login system, so "first order" is scoped to this session.
+    has_completed_order: bool = False
 
 
 class SessionStore:
@@ -126,6 +130,7 @@ class SessionStore:
                 pending_action=PendingAction(**pending) if pending else None,
                 created_at=data.get("created_at", time.time()),
                 updated_at=data.get("updated_at", time.time()),
+                has_completed_order=data.get("has_completed_order", False),
             )
         return self._memory.get(session_id)
 

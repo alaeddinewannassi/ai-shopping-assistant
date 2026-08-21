@@ -23,6 +23,8 @@ from src.agent.intents import (
     DiscoveryIntentHandler,
     DiscoveryKind,
     DiscoveryOutcome,
+    PromoIntentHandler,
+    PromoResolutionKind,
 )
 from src.agent.llm_client import LLMClient
 from src.agent.pending import PendingActionError, PendingActionGate
@@ -35,6 +37,8 @@ from src.agent.recap import (
 )
 from src.agent.taxonomy_resolver import Candidate
 from src.logging.audit import log_action
+from src.promo import engine as promo_engine
+from src.promo.strategy import PromoStrategyRule
 from src.session.store import ConversationSession, SessionStore
 
 
@@ -49,6 +53,8 @@ class DialogueContext:
     adapter: CommerceAdapter
     cart_handler: CartIntentHandler | None = None
     pending_gate: PendingActionGate | None = None
+    promo_handler: PromoIntentHandler | None = None
+    promo_rules: list[PromoStrategyRule] | None = None
 
 
 def _format_products(products, *, limit: int = 5) -> str:
@@ -282,6 +288,113 @@ def _handle_checkout_state_changed(ctx: DialogueContext, session_id: str) -> str
     )
 
 
+def _handle_apply_promo(ctx: DialogueContext, session_id: str, raw_text: str) -> str:
+    """T059/T060: a shopper-provided code and a shopper accepting a proactive suggestion are
+    handled identically — both go straight to `adapter.validate_promo()`
+    (contracts/promo-strategy.md "Manually-provided codes"); the engine is only consulted
+    for *proactive* suggestions (`_maybe_suggest_promo`), never here."""
+    assert ctx.promo_handler is not None and ctx.pending_gate is not None
+    session = ctx.session_store.get_or_create(session_id)
+    cart_id = _cart_id_for(session)
+    resolution = ctx.promo_handler.resolve_apply_promo(cart_id, raw_text)
+
+    if resolution.kind == PromoResolutionKind.NO_CODE_GIVEN:
+        return _describe_available_promos(ctx, session_id, session)
+    if resolution.kind == PromoResolutionKind.UNAVAILABLE:
+        log_action(session_id, "apply_promo", "validate_promo", "unavailable")
+        return (
+            "I can't reach the store right now, so I can't verify a promo code. "
+            "Please try again in a moment."
+        )
+    if resolution.kind == PromoResolutionKind.INVALID:
+        log_action(
+            session_id, "apply_promo", "validate_promo", "invalid",
+            details={"code": resolution.code, "reason": resolution.validation.reason},
+        )
+        return f"Sorry, {resolution.code} isn't valid for your cart right now ({resolution.validation.reason})."
+
+    assert resolution.kind == PromoResolutionKind.RESOLVED
+    validation = resolution.validation
+    recap = f"Apply code {resolution.code} for a ${validation.discount_amount:.2f} discount?"
+    action = ctx.pending_gate.propose(session_id, "apply_promo", {"code": resolution.code}, recap)
+    log_action(
+        session_id, "apply_promo", "propose", "pending",
+        details={"action_id": action.action_id, "code": resolution.code},
+    )
+    return f"{recap} (reply 'yes' to confirm or 'no' to cancel)"
+
+
+def _describe_available_promos(ctx: DialogueContext, session_id: str, session: ConversationSession) -> str:
+    """US4 Scenario 5: honestly reports when no discount currently applies, rather than
+    inventing one, when the shopper asks about promos without giving a specific code."""
+    try:
+        cart = ctx.adapter.get_cart(_cart_id_for(session))
+    except AdapterUnavailableError:
+        return "I can't reach the store right now to check for promo codes. Please try again in a moment."
+
+    if ctx.promo_rules and cart.lines and not cart.applied_promo_code:
+        session_context = {"first_order": not session.has_completed_order}
+        for suggestion in promo_engine.evaluate(cart, session_context, ctx.promo_rules):
+            try:
+                validation = ctx.adapter.validate_promo(_cart_id_for(session), suggestion.code)
+            except AdapterUnavailableError:
+                break
+            if validation.valid:
+                assert ctx.pending_gate is not None
+                recap = (
+                    f"You qualify for code {suggestion.code}, which would save you "
+                    f"${validation.discount_amount:.2f}. Apply it to your cart?"
+                )
+                action = ctx.pending_gate.propose(session_id, "apply_promo", {"code": suggestion.code}, recap)
+                log_action(
+                    session_id, "promo_suggestion", "suggest", "shown",
+                    details={"action_id": action.action_id, "code": suggestion.code},
+                )
+                return f"{recap} (reply 'yes' to confirm or 'no' to cancel)"
+
+    log_action(session_id, "apply_promo", "check_available", "none")
+    return "I don't see any discounts available for your cart right now."
+
+
+def _maybe_suggest_promo(ctx: DialogueContext, session_id: str, reply: str) -> str:
+    """T058: proactively suggests a store-validated promo code alongside a normal reply
+    (US4 Scenario 1), never surfacing a candidate the store hasn't confirmed is valid
+    (contracts/promo-strategy.md). Never overrides an in-flight PendingAction."""
+    if ctx.promo_rules is None or ctx.pending_gate is None:
+        return reply
+    # Re-fetch: any propose() made while producing `reply` (e.g. an add-to-cart proposal)
+    # must be reflected here so a promo suggestion never clobbers it.
+    session = ctx.session_store.get_or_create(session_id)
+    if session.pending_action is not None:
+        return reply
+    try:
+        cart = ctx.adapter.get_cart(_cart_id_for(session))
+    except AdapterUnavailableError:
+        return reply
+    if not cart.lines or cart.applied_promo_code:
+        return reply
+
+    session_context = {"first_order": not session.has_completed_order}
+    for suggestion in promo_engine.evaluate(cart, session_context, ctx.promo_rules):
+        try:
+            validation = ctx.adapter.validate_promo(_cart_id_for(session), suggestion.code)
+        except AdapterUnavailableError:
+            return reply
+        if not validation.valid:
+            continue
+        recap = (
+            f"You qualify for code {suggestion.code}, which would save you "
+            f"${validation.discount_amount:.2f}. Apply it to your cart?"
+        )
+        action = ctx.pending_gate.propose(session_id, "apply_promo", {"code": suggestion.code}, recap)
+        log_action(
+            session_id, "promo_suggestion", "suggest", "shown",
+            details={"action_id": action.action_id, "code": suggestion.code},
+        )
+        return f"{reply}\n\n{recap} (reply 'yes' to confirm or 'no' to cancel)"
+    return reply
+
+
 def _handle_confirm(ctx: DialogueContext, session_id: str) -> str:
     assert ctx.pending_gate is not None
     session = ctx.session_store.get_or_create(session_id)
@@ -315,6 +428,8 @@ def _handle_confirm(ctx: DialogueContext, session_id: str) -> str:
     if pending.action_type == "checkout":
         assert result.order is not None
         order = result.order
+        session.has_completed_order = True
+        ctx.session_store.save(session)
         return (
             f"Order placed! Your order id is {order.id}. "
             f"Total charged: ${order.grand_total:.2f}. Thank you for shopping with us!"
@@ -332,10 +447,20 @@ def _handle_decline(ctx: DialogueContext, session_id: str) -> str:
     return "No problem, I won't make that change. What would you like to do instead?"
 
 
+# Turns after which a fresh proactive promo suggestion would be noise (the promo flow
+# itself, and final checkout/confirm/decline turns) — see _maybe_suggest_promo.
+_SKIP_PROMO_SUGGESTION_AFTER = {
+    "apply_promo",
+    "confirm_pending_action",
+    "decline_pending_action",
+    "request_checkout",
+}
+
+
 def handle_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
-    """Handles one conversational turn across US1 (discovery/navigation) and US2 (cart
-    propose/confirm/decline). Any other recognized action_type is acknowledged but not yet
-    actionable (implemented as its user story lands)."""
+    """Handles one conversational turn across US1 (discovery/navigation), US2 (cart
+    propose/confirm/decline), US3 (checkout), and US4 (promo suggestions/apply). Any other
+    recognized action_type is acknowledged but not yet actionable."""
     session = ctx.session_store.get_or_create(session_id)
     action = ctx.llm_client.parse_turn(
         message, context={"navigation_context": session.navigation_context}
@@ -345,40 +470,46 @@ def handle_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         outcome = ctx.discovery_handler.handle_search(action.parameters.get("query", message))
         _record_navigation(ctx.session_store, session, outcome)
         log_action(session_id, action.action_type, "search_products", outcome.kind.value)
-        return render_discovery_reply(outcome)
+        reply = render_discovery_reply(outcome)
 
-    if action.action_type == "navigate_to":
+    elif action.action_type == "navigate_to":
         outcome = ctx.discovery_handler.handle_navigate(action.parameters.get("target", message))
         _record_navigation(ctx.session_store, session, outcome)
         log_action(session_id, action.action_type, "navigate_to", outcome.kind.value)
-        return render_discovery_reply(outcome)
+        reply = render_discovery_reply(outcome)
 
-    if action.action_type == "propose_add_to_cart" and ctx.cart_handler and ctx.pending_gate:
-        return _handle_propose_add_to_cart(
-            ctx, session_id, action.parameters.get("raw_text", message)
-        )
+    elif action.action_type == "propose_add_to_cart" and ctx.cart_handler and ctx.pending_gate:
+        reply = _handle_propose_add_to_cart(ctx, session_id, action.parameters.get("raw_text", message))
 
-    if action.action_type == "propose_update_cart" and ctx.cart_handler and ctx.pending_gate:
-        return _handle_propose_cart_line_change(
+    elif action.action_type == "propose_update_cart" and ctx.cart_handler and ctx.pending_gate:
+        reply = _handle_propose_cart_line_change(
             ctx, session_id, action.parameters.get("raw_text", message), remove=False
         )
 
-    if action.action_type == "propose_remove_from_cart" and ctx.cart_handler and ctx.pending_gate:
-        return _handle_propose_cart_line_change(
+    elif action.action_type == "propose_remove_from_cart" and ctx.cart_handler and ctx.pending_gate:
+        reply = _handle_propose_cart_line_change(
             ctx, session_id, action.parameters.get("raw_text", message), remove=True
         )
 
-    if action.action_type == "request_checkout" and ctx.pending_gate:
-        return _handle_request_checkout(ctx, session_id)
+    elif action.action_type == "request_checkout" and ctx.pending_gate:
+        reply = _handle_request_checkout(ctx, session_id)
 
-    if action.action_type == "confirm_pending_action" and ctx.pending_gate:
-        return _handle_confirm(ctx, session_id)
+    elif action.action_type == "apply_promo" and ctx.promo_handler and ctx.pending_gate:
+        reply = _handle_apply_promo(ctx, session_id, action.parameters.get("raw_text", message))
 
-    if action.action_type == "decline_pending_action" and ctx.pending_gate:
-        return _handle_decline(ctx, session_id)
+    elif action.action_type == "confirm_pending_action" and ctx.pending_gate:
+        reply = _handle_confirm(ctx, session_id)
 
-    return (
-        f"(Recognized intent: {action.action_type} — full handling for this intent is "
-        f"implemented as part of its user story; see tasks.md.)"
-    )
+    elif action.action_type == "decline_pending_action" and ctx.pending_gate:
+        reply = _handle_decline(ctx, session_id)
+
+    else:
+        reply = (
+            f"(Recognized intent: {action.action_type} — full handling for this intent is "
+            f"implemented as part of its user story; see tasks.md.)"
+        )
+
+    if action.action_type in _SKIP_PROMO_SUGGESTION_AFTER:
+        return reply
+    return _maybe_suggest_promo(ctx, session_id, reply)
 
