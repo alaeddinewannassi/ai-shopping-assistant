@@ -117,6 +117,12 @@ class PrestaShopAdapter:
         timeout_seconds: Optional[float] = None,
     ) -> None:
         self._base_url = (base_url or os.environ.get("PRESTASHOP_BASE_URL", "")).rstrip("/")
+        # Every call site below passes a path already prefixed with "/api/..." (matching
+        # PrestaShop's webservice docs), but PRESTASHOP_BASE_URL is documented (.env.example,
+        # quickstart.md) to itself end in "/api" — strip that suffix so the two don't combine
+        # into a double "/api/api/..." path that 404s/400s on every real request.
+        if self._base_url.endswith("/api"):
+            self._base_url = self._base_url[: -len("/api")]
         self._api_key = api_key or os.environ.get("PRESTASHOP_API_KEY", "")
         if not self._base_url or not self._api_key:
             raise ValueError(
@@ -126,7 +132,17 @@ class PrestaShopAdapter:
         self._lang_id = lang_id or _as_int(os.environ.get("PRESTASHOP_LANG_ID", "1"), 1)
 
         timeout = timeout_seconds or _as_float(os.environ.get("ADAPTER_TIMEOUT_SECONDS", "5"), 5.0)
-        self._client = httpx.Client(auth=(self._api_key, ""), timeout=timeout)
+        # PrestaShop's front controller redirects to its configured PS_DOMAIN whenever the
+        # request Host header doesn't match it (see quickstart.md's dockerized-store note) —
+        # this bites the common case of reaching the store through a Docker-internal hostname
+        # (e.g. PRESTASHOP_BASE_URL=http://prestashop/api) that differs from the browser-facing
+        # PS_DOMAIN. Overriding the Host header to PS_DOMAIN sidesteps the redirect without
+        # touching PrestaShop's own domain config.
+        client_headers = {}
+        host_header = os.environ.get("PRESTASHOP_HOST_HEADER", "")
+        if host_header:
+            client_headers["Host"] = host_header
+        self._client = httpx.Client(auth=(self._api_key, ""), timeout=timeout, headers=client_headers)
         self._breaker = CircuitBreaker(
             CircuitBreakerConfig(
                 failure_threshold=_as_int(os.environ.get("ADAPTER_FAILURE_THRESHOLD", "3"), 3),
@@ -148,6 +164,16 @@ class PrestaShopAdapter:
         # Maps the assistant's opaque session/cart_id string onto a real PrestaShop id_cart,
         # created lazily on first use (mirrors MockAdapter keying carts by that same string).
         self._cart_id_map: dict[str, int] = {}
+        self._customer_secure_key_cache: Optional[str] = None
+        # PrestaShop's webservice has no association to attach a cart_rule to a cart or
+        # order (the `cart`/`order` resource schemas only expose *_rows, never cart_rules —
+        # confirmed via GET .../carts?schema=synopsis), so an applied promo code's *name*
+        # can't be persisted on the store's side the way cart lines are — tracked here
+        # instead, purely so get_cart() can report it back (see apply_promo/_read_cart).
+        # The actual discount itself is applied via a cart-scoped `specific_price` (see
+        # apply_promo/_apply_specific_price_discount), which PrestaShop's own order-total
+        # calculation does honor — confirmed empirically against a real order.
+        self._applied_promo: dict[int, str] = {}
 
     # -- HTTP plumbing ------------------------------------------------------- #
 
@@ -347,11 +373,64 @@ class PrestaShopAdapter:
         if not validation.valid:
             raise PromoInvalidError(validation.reason or f"Invalid promo code: {code}")
 
+        id_cart = self._get_or_create_ps_cart(cart_id)
         rule = self._find_cart_rule(code)
         assert rule is not None  # validate_promo already confirmed it exists
-        id_cart = self._get_or_create_ps_cart(cart_id)
-        self._attach_cart_rule(id_cart, _as_int(rule["id"]))
+        # There's no webservice association to attach a cart_rule to a cart or order (see
+        # __init__'s note), but PrestaShop's own order-total calculation *does* honor an
+        # id_cart-scoped `specific_price` (confirmed empirically — it's the same mechanism
+        # a catalog-wide sale price uses). Replicate the rule's reduction as one per-line
+        # specific_price so the store's real, authoritative total matches what we quoted.
+        self._apply_specific_price_discount(id_cart, rule)
+        self._applied_promo[id_cart] = code
         return self._read_cart(id_cart)
+
+    def _apply_specific_price_discount(self, id_cart: int, rule: dict) -> None:
+        reduction_percent = _as_float(rule.get("reduction_percent"))
+        reduction_amount = _as_float(rule.get("reduction_amount"))
+        rows = self._read_cart_rows(id_cart)
+        for row in rows:
+            id_product = _as_int(row.get("id_product"))
+            id_product_attribute = _as_int(row.get("id_product_attribute"))
+            if reduction_percent:
+                reduction, reduction_type = reduction_percent / 100, "percentage"
+            elif reduction_amount:
+                # A flat cart-wide amount doesn't map cleanly onto a per-line specific_price;
+                # applying it once, to the first line, at least gets the real total right for
+                # the single-flat-discount case (neither of this project's demo rules uses
+                # reduction_amount, so this path isn't exercised by quickstart.md's scenarios).
+                reduction, reduction_type = reduction_amount, "amount"
+            else:
+                continue
+            xml = self._build_xml(
+                "specific_price",
+                {
+                    "id_shop": 1,
+                    "id_shop_group": 0,
+                    "id_cart": id_cart,
+                    "id_product": id_product,
+                    "id_product_attribute": id_product_attribute,
+                    "id_currency": 0,
+                    "id_country": 0,
+                    "id_group": 0,
+                    "id_customer": self._customer_id or 0,
+                    "price": -1,
+                    "from_quantity": 1,
+                    "reduction": reduction,
+                    "reduction_tax": 1,
+                    "reduction_type": reduction_type,
+                    "from": "2020-01-01 00:00:00",
+                    "to": "2030-01-01 00:00:00",
+                },
+            )
+            resp = self._xml_request("POST", "/api/specific_prices", xml)
+            if resp.status_code >= 400:
+                raise _TransportError(
+                    f"Failed to apply promo discount to cart {id_cart}: "
+                    f"{resp.status_code} {resp.text[:200]}"
+                )
+            if reduction_amount and not reduction_percent:
+                break
 
     def checkout(self, cart_id: str) -> Order:
         if not (self._customer_id and self._address_id and self._carrier_id):
@@ -386,6 +465,10 @@ class PrestaShopAdapter:
             "id_lang": self._lang_id,
             "id_shop": 1,
             "current_state": self._order_state_id,
+            # PrestaShop's order validation rejects any order whose secure_key doesn't
+            # match the owning customer's (Validate::isLoadedObject / OrderCore checks) —
+            # there is no way to omit or fake this at the webservice layer.
+            "secure_key": self._customer_secure_key(),
             "module": self._payment_module,
             "payment": self._payment_label,
             "total_paid": total,
@@ -405,11 +488,12 @@ class PrestaShopAdapter:
         raw = data.get("order", data)
         order_id = str(raw.get("id", ""))
 
-        # A successful order consumes the cart; drop the local mapping so a later get_cart
+        # A successful order consumes the cart; drop the local mappings so a later get_cart
         # for this session_id starts a fresh one, matching MockAdapter's post-checkout reset.
         for key, mapped_id in list(self._cart_id_map.items()):
             if mapped_id == id_cart:
                 del self._cart_id_map[key]
+        self._applied_promo.pop(id_cart, None)
 
         return Order(id=order_id, cart_id=cart_id, lines=cart.lines, discount_total=cart.discount_total, grand_total=total)
 
@@ -424,6 +508,11 @@ class PrestaShopAdapter:
 
     def _create_cart(self) -> int:
         fields = {"id_lang": self._lang_id, "id_currency": self._currency_id, "id_shop": 1}
+        # Attaching the configured default customer up front (rather than only at checkout)
+        # keeps the cart's id_customer consistent with the order placed against it later —
+        # PrestaShop's order validation checks the two agree.
+        if self._customer_id:
+            fields["id_customer"] = self._customer_id
         xml_body = self._build_xml("cart", fields)
         resp = self._xml_request("POST", "/api/carts", xml_body)
         if resp.status_code >= 400:
@@ -431,6 +520,13 @@ class PrestaShopAdapter:
         data = resp.json()
         raw = data.get("cart", data)
         return _as_int(raw.get("id"))
+
+    def _customer_secure_key(self) -> str:
+        if self._customer_secure_key_cache is None:
+            data = self._get(f"/api/customers/{self._customer_id}")
+            raw = (data or {}).get("customer", data or {})
+            self._customer_secure_key_cache = raw.get("secure_key", "")
+        return self._customer_secure_key_cache
 
     def _read_cart(self, id_cart: int) -> Cart:
         data = self._get(f"/api/carts/{id_cart}")
@@ -456,18 +552,16 @@ class PrestaShopAdapter:
 
         applied_code = None
         discount_total = 0.0
-        cart_rules = self._as_list(
-            {"cart_rules": raw.get("associations", {}).get("cart_rules", [])}, "cart_rules", "cart_rule"
-        )
-        if cart_rules:
-            rule_id = _as_int(cart_rules[0].get("id_cart_rule") or cart_rules[0].get("id"))
-            rule = self._get(f"/api/cart_rules/{rule_id}")
+        # The webservice has no association for a cart's applied cart_rule (see
+        # __init__'s note) — read back whatever apply_promo() tracked locally instead.
+        tracked_code = self._applied_promo.get(id_cart)
+        if tracked_code:
+            rule = self._find_cart_rule(tracked_code)
             if rule:
-                rule_raw = rule.get("cart_rule", rule)
-                applied_code = rule_raw.get("code")
+                applied_code = tracked_code
                 subtotal = round(sum(line.line_total for line in lines), 2)
-                discount_total = _as_float(rule_raw.get("reduction_amount")) + round(
-                    subtotal * _as_float(rule_raw.get("reduction_percent")) / 100, 2
+                discount_total = _as_float(rule.get("reduction_amount")) + round(
+                    subtotal * _as_float(rule.get("reduction_percent")) / 100, 2
                 )
 
         return Cart(id=str(id_cart), lines=lines, applied_promo_code=applied_code, discount_total=discount_total)
@@ -498,13 +592,6 @@ class PrestaShopAdapter:
         resp = self._xml_request("PATCH", f"/api/carts/{id_cart}", xml_body)
         if resp.status_code >= 400:
             raise _TransportError(f"Failed to update cart {id_cart}: {resp.status_code} {resp.text[:200]}")
-
-    def _attach_cart_rule(self, id_cart: int, id_cart_rule: int) -> None:
-        rules_xml = f"<cart_rules><cart_rule><id_cart_rule><![CDATA[{id_cart_rule}]]></id_cart_rule></cart_rule></cart_rules>"
-        xml_body = self._build_xml("cart", {"id": id_cart}, associations_xml=rules_xml)
-        resp = self._xml_request("PATCH", f"/api/carts/{id_cart}", xml_body)
-        if resp.status_code >= 400:
-            raise _TransportError(f"Failed to attach promo to cart {id_cart}: {resp.status_code} {resp.text[:200]}")
 
     # -- Internal: product/stock/promo lookups -------------------------------- #
 

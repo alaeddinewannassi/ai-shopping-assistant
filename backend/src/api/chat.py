@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from src.adapters.base import AdapterUnavailableError, CommerceAdapter
@@ -25,6 +26,17 @@ from src.session.catalog_cache import CatalogSnapshotCache
 from src.session.store import SessionStore
 
 app = FastAPI(title="AI Shopping Assistant", version="0.1.0")
+
+# The widget (widget/src) is designed to be embedded on the merchant's storefront, an
+# origin that's necessarily different from wherever this API is hosted — allow any origin
+# rather than hardcoding the demo store's URL, matching a public-facing chat widget's
+# actual deployment shape.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class ChatRequest(BaseModel):

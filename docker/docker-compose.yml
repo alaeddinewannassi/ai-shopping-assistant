@@ -30,7 +30,6 @@ services:
       PS_FOLDER_INSTALL: ${PS_FOLDER_INSTALL:-install}
       PS_INSTALL_AUTO: ${PS_INSTALL_AUTO:-1}
       PS_ENABLE_SSL: 0
-      PS_HANDLE_DYNAMIC_DOMAIN: 1
       ADMIN_MAIL: ${PS_ADMIN_EMAIL:-demo@example.com}
       ADMIN_PASSWD: ${PS_ADMIN_PASSWORD:-AssistantDemo123!}
     ports:
@@ -54,6 +53,10 @@ services:
       - redis
     environment:
       PRESTASHOP_BASE_URL: http://prestashop/api
+      # PrestaShop redirects any request whose Host header doesn't match its configured
+      # PS_DOMAIN — override it here since we reach the store via the internal Docker
+      # hostname "prestashop" rather than the browser-facing PS_DOMAIN below.
+      PRESTASHOP_HOST_HEADER: ${PS_DOMAIN:-localhost:8080}
       REDIS_URL: redis://redis:6379/0
     env_file:
       - path: ../backend/.env
