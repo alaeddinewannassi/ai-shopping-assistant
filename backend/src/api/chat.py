@@ -21,6 +21,7 @@ from src.agent.intents import CartIntentHandler, DiscoveryIntentHandler, PromoIn
 from src.agent.llm_client import RuleBasedStubClient, create_llm_client
 from src.agent.pending import PendingActionGate
 from src.agent.taxonomy_resolver import TaxonomyResolver
+from src.logging.audit import get_audit_history
 from src.promo.strategy import load_rules
 from src.session.catalog_cache import CatalogSnapshotCache
 from src.session.store import SessionStore
@@ -138,3 +139,11 @@ def chat(request: ChatRequest) -> ChatResponse:
     """
     reply = handle_turn(_dialogue_ctx, request.session_id, request.message)
     return ChatResponse(session_id=request.session_id, reply=reply)
+
+
+@app.get("/audit/{session_id}")
+def audit(session_id: str) -> dict[str, object]:
+    """Returns this session's audit trail (FR-014) — every navigation change, cart
+    mutation, promo suggestion/application, and checkout action logged so far, oldest
+    first. Empty list for an unknown, expired, or brand-new session."""
+    return {"session_id": session_id, "events": get_audit_history(session_id)}
