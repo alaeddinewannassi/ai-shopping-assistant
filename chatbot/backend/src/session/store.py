@@ -66,6 +66,15 @@ class ConversationSession:
     # (unless window.prestashop.page says the shopper is already there), not just a link.
     last_turn_auto_navigate_product_id: str | None = None
     last_turn_auto_navigate_to_cart: bool = False
+    # Persists across turns (unlike the last_turn_* fields above) until resolved — set
+    # whenever resolve_add_to_cart lands on exactly one product but can't tell which variant
+    # (AMBIGUOUS_VARIANT), cleared once that's answered or a clearly different flow starts.
+    # Without this, a bare follow-up like "size S white" has no idea which product it's
+    # answering for — dialogue.py._handle_propose_add_to_cart prioritizes this over
+    # last_shown_product_ids so the answer resolves against the right item, not whatever was
+    # last searched (which could be a stale, unrelated discovery result).
+    pending_variant_product_id: str | None = None
+    pending_variant_product_name: str = ""
     pending_action: PendingAction | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -163,6 +172,8 @@ class SessionStore:
                 last_turn_shows_cart_link=data.get("last_turn_shows_cart_link", False),
                 last_turn_auto_navigate_product_id=data.get("last_turn_auto_navigate_product_id"),
                 last_turn_auto_navigate_to_cart=data.get("last_turn_auto_navigate_to_cart", False),
+                pending_variant_product_id=data.get("pending_variant_product_id"),
+                pending_variant_product_name=data.get("pending_variant_product_name", ""),
                 pending_action=PendingAction(**pending) if pending else None,
                 created_at=data.get("created_at", time.time()),
                 updated_at=data.get("updated_at", time.time()),

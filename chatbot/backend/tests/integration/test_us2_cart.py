@@ -311,3 +311,43 @@ def test_cart_action_marks_the_turn_as_cart_link_worthy(
     assert session.last_turn_product_ids == []  # this is a cart link, not a product link
     # The initial propose still needs a yes/no answer — never auto-navigate before that.
     assert session.last_turn_auto_navigate_to_cart is False
+
+
+# -- Pending variant-clarification memory across turns ------------------------------------ #
+
+
+def test_bare_variant_answer_resolves_against_the_product_still_being_asked_about(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    """Regression test for the real purchase-blocking bug from a shared transcript: a shopper
+    asked to add the Classic T-Shirt (two variants, Red/M and Blue/M — color unspecified is
+    genuinely ambiguous), was asked which option they meant, and answered with just a bare
+    attribute ("red") with no product name in it. Previously that answer had no memory of
+    which product it was even answering for, so it fell back to whatever was last
+    searched/shown (possibly nothing, or something else entirely) instead of resolving
+    against the Classic T-Shirt the clarifying question was actually about."""
+    ctx = _ctx(adapter, llm_client, session_store)
+
+    first_reply = handle_turn(ctx, "u16", "add the classic t-shirt")
+    assert "Which option of Classic T-Shirt did you mean" in first_reply
+
+    session = session_store.get_or_create("u16")
+    assert session.pending_variant_product_name == "Classic T-Shirt"
+    assert session.pending_variant_product_id is not None
+
+    second_reply = handle_turn(ctx, "u16", "red")
+
+    assert "couldn't find a product" not in second_reply.lower()
+    assert "Classic T-Shirt" in second_reply
+    assert "confirm" in second_reply.lower() or "yes" in second_reply.lower()
+
+    # The open question has been answered — nothing should linger to misdirect a later,
+    # unrelated turn.
+    session = session_store.get_or_create("u16")
+    assert session.pending_variant_product_id is None
+
+    confirm_reply = handle_turn(ctx, "u16", "yes")
+    assert "Classic T-Shirt" in confirm_reply
+    cart = adapter.get_cart("u16")
+    assert len(cart.lines) == 1
+    assert cart.lines[0].variant_id == "var-tshirt-1-red-m"

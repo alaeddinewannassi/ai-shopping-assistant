@@ -103,6 +103,12 @@ class RuleBasedStubClient:
             return ActionCall(action_type="propose_update_cart", parameters={"raw_text": text})
         if self._ADD_PATTERNS.search(text):
             return ActionCall(action_type="propose_add_to_cart", parameters={"raw_text": text})
+        if context.get("pending_variant_product"):
+            # A bare attribute answer ("size S white") to an open which-size/color question
+            # matches none of the patterns above — without this, the stub (like a real LLM
+            # risks doing) would misroute it to search_products instead of resolving it
+            # against the product still awaiting an answer.
+            return ActionCall(action_type="propose_add_to_cart", parameters={"raw_text": text})
 
         # Default: treat anything else as a discovery/search request.
         return ActionCall(action_type="search_products", parameters={"query": text})
@@ -324,6 +330,10 @@ Pass the shopper's own words through in `raw_text`/`query`/`target` verbatim; th
 looks them up for real and will ask a clarifying question if needed.
 - Use confirm_pending_action / decline_pending_action ONLY when the context says a pending \
 action exists, and only when the shopper is actually agreeing or declining it.
+- If the context says you just asked which size/color the shopper wants, and their message \
+answers that (even just "size S", "white", or similar, with no product name), classify it as \
+propose_add_to_cart with raw_text set to the shopper's own words — do not treat it as a new \
+search.
 - If the shopper wants to check out / place the order right now, use request_checkout.
 - If the shopper mentions a promo/coupon/discount code, or asks about discounts, use \
 apply_promo.
@@ -371,6 +381,13 @@ def _build_user_content(message: str, context: dict) -> str:
     last_shown = context.get("last_shown_products")
     if last_shown:
         lines.append(f"[Context: you just showed the shopper these products: {last_shown}]")
+    pending_variant = context.get("pending_variant_product")
+    if pending_variant:
+        lines.append(
+            f"[Context: you just asked the shopper which size/color of {pending_variant} they "
+            "want — if this message answers that (even just attributes like a size or color, "
+            "with no product name), use propose_add_to_cart]"
+        )
     lines.append(f"Shopper: {message}")
     return "\n".join(lines)
 

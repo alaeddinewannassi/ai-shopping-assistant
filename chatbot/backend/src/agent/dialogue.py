@@ -170,26 +170,47 @@ def _handle_propose_add_to_cart(
     ctx: DialogueContext, session_id: str, raw_text: str, last_shown_ids: list[str]
 ) -> str:
     assert ctx.cart_handler is not None and ctx.pending_gate is not None
+    session = ctx.session_store.get_or_create(session_id)
     resolution = ctx.cart_handler.resolve_add_to_cart(raw_text, last_shown_ids)
 
+    def _clear_pending_variant() -> None:
+        if session.pending_variant_product_id is not None:
+            session.pending_variant_product_id = None
+            session.pending_variant_product_name = ""
+            ctx.session_store.save(session)
+
     if resolution.kind == CartResolutionKind.UNAVAILABLE:
+        # Deliberately leaves any pending_variant_product_id untouched — this is a transient
+        # adapter outage, not an answer to (or abandonment of) the open variant question, so a
+        # retry should still resolve against the same product.
         log_action(session_id, "propose_add_to_cart", "search_products", "unavailable")
         return (
             "I can't reach the store's catalog right now, so I can't verify that product. "
             "Please try again in a moment."
         )
     if resolution.kind == CartResolutionKind.NOT_FOUND:
+        _clear_pending_variant()
         return "I couldn't find a product matching that — could you tell me its name?"
     if resolution.kind == CartResolutionKind.AMBIGUOUS_PRODUCT:
+        _clear_pending_variant()
         return _format_clarifying_question(resolution.candidates)
     if resolution.kind == CartResolutionKind.AMBIGUOUS_VARIANT:
         assert resolution.product is not None
+        # Persists across turns (unlike the last_turn_* session fields) so a bare follow-up
+        # answer like "size S white" — which matches no product name on its own — has
+        # something to resolve against on the NEXT turn instead of falling back to whatever
+        # was last searched/shown, which may be a stale, unrelated result. See
+        # ConversationSession.pending_variant_product_id's docstring for the full rationale.
+        session.pending_variant_product_id = resolution.product.id
+        session.pending_variant_product_name = resolution.product.name
+        ctx.session_store.save(session)
         return (
             f"Which option of {resolution.product.name} did you mean — "
             + _format_clarifying_question(resolution.candidates)
         )
     if resolution.kind == CartResolutionKind.OUT_OF_STOCK:
         assert resolution.product is not None and resolution.variant is not None
+        _clear_pending_variant()
         if resolution.alternatives:
             alt = ", ".join(
                 ", ".join(f"{k}: {v}" for k, v in alt_variant.attributes.items())
@@ -203,6 +224,7 @@ def _handle_propose_add_to_cart(
 
     assert resolution.kind == CartResolutionKind.RESOLVED
     assert resolution.product is not None and resolution.variant is not None
+    _clear_pending_variant()
     recap = build_add_to_cart_recap(resolution.product, resolution.variant, resolution.quantity)
     action = ctx.pending_gate.propose(
         session_id,
@@ -612,6 +634,13 @@ def _build_llm_context(session: ConversationSession) -> dict:
             "action_type": session.pending_action.action_type,
             "recap_text": session.pending_action.recap_text,
         }
+    if session.pending_variant_product_id:
+        # Nudges the LLM to route a bare attribute answer ("size S white") to
+        # propose_add_to_cart instead of misreading it as a fresh search_products query or
+        # ask_or_chat — dialogue.py's own reference-resolution (_resolve_single_product's
+        # last-shown fallback) is what actually resolves it correctly once routed there; this
+        # is only about getting the action_type classification right.
+        context["pending_variant_product"] = session.pending_variant_product_name
     return context
 
 
@@ -688,8 +717,16 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
             auto_navigate_product_id = outcome.products[0].id
 
     elif action.action_type == "propose_add_to_cart" and ctx.cart_handler and ctx.pending_gate:
+        # An open "which size/color?" question takes priority over last_shown_product_ids —
+        # a bare follow-up like "size S white" answers THAT question, not a fresh reference to
+        # whatever was most recently searched/shown (which may be stale/unrelated by now).
+        reference_ids = (
+            [session.pending_variant_product_id]
+            if session.pending_variant_product_id
+            else session.last_shown_product_ids
+        )
         reply = _handle_propose_add_to_cart(
-            ctx, session_id, action.parameters.get("raw_text", message), session.last_shown_product_ids
+            ctx, session_id, action.parameters.get("raw_text", message), reference_ids
         )
 
     elif action.action_type == "propose_update_cart" and ctx.cart_handler and ctx.pending_gate:
