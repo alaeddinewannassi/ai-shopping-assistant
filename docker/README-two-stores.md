@@ -17,6 +17,7 @@ two tenants, and one login legitimately managing both.
 | Chatbot backend | http://localhost:8000 | One process, serves both tenants by `X-Assistant-Key` |
 | Backoffice API | http://localhost:8001 | Analytics/admin API |
 | Backoffice dashboard | http://localhost:5173 | Where you log in once to see both stores |
+| `migrate` | (none — one-shot) | Applies tenancy-db's Alembic migrations, then exits |
 
 ## 1. Bring up the stack
 
@@ -31,6 +32,11 @@ internally, then bakes the bundle + a `<assistant-chat-widget>` tag into
 installer against two separate MySQL databases. Give it a few minutes; watch progress with
 `docker compose ps` (once `prestashop`/`prestashop-two` are running, http://localhost:8080
 and :8090 answer).
+
+`assistant-service`/`backoffice-service` both wait on the one-shot `migrate` service
+(`tenancy-db/Dockerfile`, `condition: service_completed_successfully`) to apply the schema
+to Postgres before they start — nothing to do here, but if either service fails to boot,
+`docker compose logs migrate` is the first place to check.
 
 If you already ran `docker compose up` **before** this two-store setup existed, the named
 volumes (`prestashop_data`/`prestashop_data_two`) were seeded from the old single-store
@@ -112,6 +118,11 @@ store's own session, not the first one's.
 
 ## Troubleshooting
 
+- **500 error mentioning `_dialogue_ctx` or `NotImplementedError` in `llm_client.py`**:
+  `assistant-service`/`backoffice-service` are running a stale image built before this
+  repo's `backend/` → `chatbot/backend/` restructuring (Docker only rebuilds on `--build`,
+  never automatically). Fix: `docker compose up -d --build assistant-service
+  backoffice-service backoffice-frontend`.
 - **Widget doesn't appear on the storefront**: check you rebuilt after this Dockerfile
   landed (`docker compose up -d --build`) and that the volume wasn't pre-seeded from the
   old image (`docker compose down -v` once, see step 1).

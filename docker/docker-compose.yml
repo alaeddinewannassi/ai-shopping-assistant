@@ -121,11 +121,27 @@ services:
       timeout: 5s
       retries: 10
 
+  # One-shot: applies tenancy-db's Alembic migrations, then exits. Neither app service runs
+  # its own migrations on boot (see tenancy-db/Dockerfile) — both wait on this one instead,
+  # so `docker compose up` always leaves the schema in a valid state before either starts.
+  migrate:
+    build:
+      context: ..
+      dockerfile: tenancy-db/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-assistant}:${POSTGRES_PASSWORD:-assistant}@postgres:5432/${POSTGRES_DB:-assistant}
+    restart: "no"
+
   assistant-service:
     build:
       context: ..
       dockerfile: chatbot/backend/Dockerfile
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       prestashop:
         condition: service_started
       prestashop-two:
@@ -160,6 +176,8 @@ services:
       context: ..
       dockerfile: backoffice/backend/Dockerfile
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     environment:
