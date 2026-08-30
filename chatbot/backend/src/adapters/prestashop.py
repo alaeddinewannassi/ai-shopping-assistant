@@ -24,12 +24,15 @@ checkout shortcut at the webservice layer.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+
+_logger = logging.getLogger("assistant.adapter")
 
 from src.adapters.base import (
     AdapterUnavailableError,
@@ -217,15 +220,22 @@ class PrestaShopAdapter:
                 resp = self._client.get(f"{self._base_url}{path}", params=params)
             except httpx.HTTPError as exc:
                 raise _TransportError(str(exc)) from exc
-            if resp.status_code >= 500:
-                raise _TransportError(f"PrestaShop returned {resp.status_code} for GET {path}")
+            # 404 is a legitimate "no such resource" business outcome for several callers
+            # (get_product/get_cart use it to detect "doesn't exist yet") — never retried or
+            # reclassified. Any OTHER 4xx (a real, confirmed live case: 401 "Resource of type
+            # ... is not allowed with this authentication key" — a webservice permission
+            # never granted for this tenant's key) must go through the SAME breaker.call
+            # retry/conversion path as a 5xx below, not raise _TransportError after
+            # breaker.call has already returned — that would propagate as a raw, unhandled
+            # exception instead of the graceful AdapterUnavailableError every caller in
+            # dialogue.py already expects and handles.
+            if resp.status_code != 404 and resp.status_code >= 400:
+                raise _TransportError(f"PrestaShop returned {resp.status_code} for GET {path}: {resp.text[:200]}")
             return resp
 
         resp = self._breaker.call(do, is_transport_error=_is_transport_error)
         if resp.status_code == 404:
             return None
-        if resp.status_code >= 400:
-            raise _TransportError(f"PrestaShop returned {resp.status_code} for GET {path}: {resp.text[:200]}")
         return resp.json()
 
     def _xml_request(self, method: str, path: str, xml_body: str) -> Any:
@@ -788,7 +798,18 @@ class PrestaShopAdapter:
         return self._apply_specific_price(price, self._specific_price_rows(id_product))
 
     def _specific_price_rows(self, id_product: int) -> list[dict]:
-        data = self._get("/api/specific_prices", {"display": "full", "filter[id_product]": id_product})
+        # A real, confirmed live case: a tenant's webservice key had every OTHER needed
+        # permission but not this one ("Resource of type 'specific_prices' is not allowed
+        # with this authentication key") — search/product-details must not go completely
+        # dark over a missing permission for what's purely a pricing enhancement. Degrades
+        # to "no active reduction known" (the undiscounted catalog price) rather than
+        # failing the whole request; a genuine store-wide outage still surfaces normally
+        # everywhere else this adapter is used.
+        try:
+            data = self._get("/api/specific_prices", {"display": "full", "filter[id_product]": id_product})
+        except AdapterUnavailableError as exc:
+            _logger.warning("specific_prices unavailable for product %s, showing undiscounted price: %s", id_product, exc)
+            return []
         return self._as_list(data, "specific_prices", "specific_price")
 
     def _apply_specific_price(self, price: float, rows: list[dict]) -> float:

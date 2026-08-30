@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import httpx
 
+from src.adapters.base import AdapterUnavailableError
 from src.adapters.prestashop import (
     PrestaShopAdapter,
     _as_bool,
@@ -220,6 +221,39 @@ def test_get_product_handles_the_plural_wrapped_display_full_response() -> None:
     assert product.description == "A soft cotton tee."
     assert len(product.variants) == 1
     assert product.variants[0].stock_quantity == 7
+
+
+# -- _get's 4xx handling -------------------------------------------------------------- #
+
+
+def test_get_converts_a_non_404_4xx_into_adapter_unavailable() -> None:
+    """Regression test for a real bug found via live testing: a tenant's webservice key
+    lacked permission for one resource ("specific_prices"), and PrestaShop's 401 response
+    for that was raised as a raw, unhandled _TransportError — outside the circuit breaker's
+    retry/conversion path — crashing the whole request with a 500 instead of the graceful
+    AdapterUnavailableError every caller in dialogue.py already expects and handles."""
+    adapter = _adapter_with_mock_transport(
+        lambda r: httpx.Response(401, json={"errors": [{"code": 26, "message": "not allowed"}]})
+    )
+    try:
+        adapter._get("/api/specific_prices", {"filter[id_product]": 1})
+    except AdapterUnavailableError:
+        pass
+    else:
+        raise AssertionError("expected AdapterUnavailableError for a non-404 4xx response")
+
+
+def test_get_still_returns_none_for_a_genuine_404() -> None:
+    adapter = _adapter_with_mock_transport(lambda r: httpx.Response(404))
+    assert adapter._get("/api/products/999") is None
+
+
+def test_specific_price_rows_degrades_to_no_reduction_when_permission_denied() -> None:
+    """A missing permission for this one, purely-cosmetic pricing resource must not take
+    down search/product-details entirely — falls back to "no active reduction known" (the
+    undiscounted catalog price) instead of propagating the failure."""
+    adapter = _adapter_with_mock_transport(lambda r: httpx.Response(401, json={"errors": []}))
+    assert adapter._specific_price_rows(1) == []
 
 
 # -- Real-shopper identity resolution (set_customer_context) -------------------------- #
