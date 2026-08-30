@@ -120,12 +120,20 @@ def render_discovery_reply(outcome: DiscoveryOutcome) -> str:
 def _record_navigation(
     session_store: SessionStore, session: ConversationSession, outcome: DiscoveryOutcome
 ) -> None:
+    changed = False
     if outcome.kind == DiscoveryKind.NAVIGATE_CATEGORY and outcome.category is not None:
         session.navigation_context = {
             "type": "category",
             "category_id": outcome.category.id,
             "label": outcome.category.display_label,
         }
+        changed = True
+    if outcome.products:
+        # Fed back as LLM context on the NEXT turn (_build_llm_context) so a follow-up like
+        # "does it fit a young man?" has something real to connect "it" to.
+        session.last_shown_products = _format_products(outcome.products)
+        changed = True
+    if changed:
         session_store.save(session)
 
 
@@ -535,6 +543,8 @@ def _build_llm_context(session: ConversationSession) -> dict:
     ignores it entirely. `pending_action` lets a real model correctly route "yes"/"actually,
     cancel that" against what's actually pending, rather than guessing from bare keywords."""
     context: dict = {"navigation_context": session.navigation_context}
+    if session.last_shown_products:
+        context["last_shown_products"] = session.last_shown_products
     if session.pending_action is not None:
         context["pending_action"] = {
             "action_type": session.pending_action.action_type,

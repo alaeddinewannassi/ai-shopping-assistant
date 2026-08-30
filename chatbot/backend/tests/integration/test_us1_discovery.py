@@ -183,3 +183,16 @@ def test_ask_or_chat_falls_back_to_a_default_when_text_is_missing(
     reply = handle_turn(ctx, "s9", "hello")
 
     assert reply == "How can I help you find something today?"
+
+
+def test_a_real_search_result_is_remembered_as_context_for_the_next_turn(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    """A follow-up question right after a search result (e.g. "does it fit a young man?")
+    needs something to connect "it" to — this is what feeds that into the LLM's context on
+    the NEXT turn (dialogue.py's _build_llm_context / _record_navigation)."""
+    ctx = _ctx(adapter, llm_client, session_store)
+    handle_turn(ctx, "s10", "show me jackets")
+
+    session = session_store.get_or_create("s10")
+    assert "Blue Jacket" in session.last_shown_products

@@ -249,9 +249,12 @@ _TOOLS: list[dict[str, Any]] = [
                         "description": (
                             "Your reply, in your own words — greet them back, ask a "
                             "clarifying question, or help them narrow down what they're "
-                            "looking for. NEVER state a specific product name, price, "
-                            "category, or stock level here — you have no live catalog "
-                            "access. If answering needs real catalog data, use "
+                            "looking for. You may refer to items from a '[Context: you just "
+                            "showed the shopper these products: ...]' line above by the "
+                            "exact name/price given there, but NEVER state a product name, "
+                            "price, category, or stock level that isn't already given to you "
+                            "in context — you have no live catalog access beyond that. If "
+                            "answering needs catalog data you don't already have, use "
                             "search_products or navigate_to instead of this tool. If the "
                             "shopper asks about anything unrelated to shopping at this store "
                             "(politics, news, general trivia, other topics), do not answer "
@@ -273,9 +276,10 @@ set of tools. Each turn, call exactly one of the provided tools — the one that
 what the shopper just said. Never skip calling a tool.
 
 Rules:
-- Never invent product names, categories, or prices — you don't have the catalog. Pass the \
-shopper's own words through in `raw_text`/`query`/`target` verbatim; the platform looks them \
-up for real and will ask a clarifying question if needed.
+- Never invent product names, categories, or prices — you don't have the catalog, other than \
+whatever a "[Context: ...]" line above the shopper's message already gives you verbatim. \
+Pass the shopper's own words through in `raw_text`/`query`/`target` verbatim; the platform \
+looks them up for real and will ask a clarifying question if needed.
 - Use confirm_pending_action / decline_pending_action ONLY when the context says a pending \
 action exists, and only when the shopper is actually agreeing or declining it.
 - If the shopper wants to check out / place the order right now, use request_checkout.
@@ -304,6 +308,9 @@ def _build_user_content(message: str, context: dict) -> str:
     nav = context.get("navigation_context")
     if nav:
         lines.append(f"[Context: the shopper is currently browsing {nav}]")
+    last_shown = context.get("last_shown_products")
+    if last_shown:
+        lines.append(f"[Context: you just showed the shopper these products: {last_shown}]")
     lines.append(f"Shopper: {message}")
     return "\n".join(lines)
 

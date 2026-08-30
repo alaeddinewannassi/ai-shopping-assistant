@@ -242,6 +242,23 @@ def test_groq_client_context_includes_pending_action_for_the_model() -> None:
     assert "Red T-Shirt" in seen_content["user_message"]
 
 
+def test_groq_client_context_includes_last_shown_products_for_the_model() -> None:
+    seen_content = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen_content["user_message"] = body["messages"][1]["content"]
+        return _groq_response(name="ask_or_chat", arguments={"text": "It's a men's t-shirt, so yes!"})
+
+    client = FreeTierHostedLLMClient(api_key="fake-key", client=_mock_client(handler))
+    action = client.parse_turn(
+        "does it fit a young man?",
+        {"last_shown_products": "Hummingbird printed t-shirt ($23.90)"},
+    )
+    assert action.action_type == "ask_or_chat"
+    assert "Hummingbird printed t-shirt" in seen_content["user_message"]
+
+
 def test_groq_client_returns_ask_or_chat_for_a_greeting() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)

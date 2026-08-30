@@ -40,6 +40,12 @@ class ConversationSession:
     session_id: str
     cart_id: str | None = None
     navigation_context: dict = field(default_factory=dict)
+    # A compact text summary of the products from the most recent search/navigate result
+    # (dialogue.py's _format_products — "Name ($price); ..."), fed back to the LLM as context
+    # on the NEXT turn. Without this, a follow-up question like "does it fit a young man?"
+    # right after a search result has zero connection to what was just shown — the LLM has
+    # no way to know what "it" refers to, even though the shopper can see it right above.
+    last_shown_products: str = ""
     pending_action: PendingAction | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -129,6 +135,7 @@ class SessionStore:
                 session_id=data["session_id"],
                 cart_id=data.get("cart_id"),
                 navigation_context=data.get("navigation_context", {}),
+                last_shown_products=data.get("last_shown_products", ""),
                 pending_action=PendingAction(**pending) if pending else None,
                 created_at=data.get("created_at", time.time()),
                 updated_at=data.get("updated_at", time.time()),
