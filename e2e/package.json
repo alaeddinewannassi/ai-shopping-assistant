@@ -1,0 +1,19 @@
+{
+  "name": "ai-shopping-assistant-e2e",
+  "version": "0.1.0",
+  "description": "Full-journey Playwright E2E test spanning chatbot/ and backoffice/ against a real Groq LLM (specs/002-backoffice-analytics).",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "build:widget": "cd ../chatbot/widget && npm run build && cp dist/assistant-widget.js ../../e2e/widget-demo/assistant-widget.js",
+    "seed": "node scripts/seed-db.mjs",
+    "pretest": "npm run build:widget && npm run seed",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.47.0",
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.4"
+  }
+}

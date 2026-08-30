@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tenancy_db"]
+
+[project]
+name = "tenancy-db"
+version = "0.1.0"
+description = "Shared tenancy + admin data layer (SQLAlchemy models, repositories, Alembic migrations) for the AI Shopping Assistant's multi-tenant backoffice (specs/002-backoffice-analytics). Installed by both backend/ (the chatbot service, which only reads tenant config) and backoffice-backend/ (the admin API, which owns writes) — the two never import each other."
+requires-python = ">=3.11"
+dependencies = [
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.2",
+    "cryptography>=42",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

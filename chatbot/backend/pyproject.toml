@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[project]
+name = "ai-shopping-assistant"
+version = "0.1.0"
+description = "Conversational AI shopping assistant backend, pluggable into PrestaShop or any e-commerce store via a CommerceAdapter."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "pydantic>=2.9",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "redis>=5.0",
+    # Shared tenancy/admin data layer (../../tenancy-db) — models, repositories, crypto,
+    # migrations. This service only ever reads tenant config through it; it never writes
+    # (writes are the separate backoffice-backend's job). Install with:
+    #   pip install -e ../../tenancy-db
+    "tenancy-db",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# B008 (function call in a default argument) is a false positive for FastAPI's
+# `Depends(...)` dependency-injection pattern (src/tenancy/resolver.py's
+# resolve_tenant_runtime, used as a route parameter default) — that's the framework's
+# documented, required usage, not a bug.
+#
+# S110/S112 (try-except-pass/continue) fire on this codebase's deliberate resilience
+# pattern: a best-effort side path (Redis persistence, the analytics event writer, a
+# display-name lookup) must never raise or block the caller — every such block already
+# carries a `# noqa: BLE001` explaining why the broad catch is intentional, which is the
+# established convention here in place of logging each one.
+ignore = ["B008", "S110", "S112"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

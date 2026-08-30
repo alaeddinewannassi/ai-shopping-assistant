@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>E2E widget demo</title>
+    <!-- Suppresses the browser's automatic /favicon.ico request — python -m http.server
+         has no favicon, and that 404 would otherwise show up as a spurious console error,
+         tripping shopping-journey.spec.ts's strict "no console errors" assertion. -->
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <h1>Demo storefront</h1>
+    <p>The chat widget is anchored bottom-right — this page exists only to host it for the
+      full-journey Playwright test (e2e/tests/shopping-journey.spec.ts).</p>
+
+    <script src="/assistant-widget.js"></script>
+    <script>
+      // api-base/tenant-key/sessionId come from the test's own page.goto() query params, not
+      // baked into this file — seed.py's widget key changes on every run. Built as an HTML
+      // string (not createElement + setAttribute) so every attribute — session-id included —
+      // is already present when the custom element is parsed and upgraded: the widget reads
+      // session-id in its constructor, which runs synchronously at parse/upgrade time, before
+      // any setAttribute call made afterward would take effect.
+      var params = new URLSearchParams(window.location.search);
+      var apiBase = params.get("apiBase") || "http://localhost:8000";
+      var tenantKey = params.get("tenantKey") || "";
+      var sessionId = params.get("sessionId") || "";
+      var attrs = 'api-base="' + apiBase + '"';
+      if (tenantKey) attrs += ' tenant-key="' + tenantKey + '"';
+      if (sessionId) attrs += ' session-id="' + sessionId + '"';
+      document.body.insertAdjacentHTML("beforeend", "<assistant-chat-widget " + attrs + "></assistant-chat-widget>");
+    </script>
+  </body>
+</html>

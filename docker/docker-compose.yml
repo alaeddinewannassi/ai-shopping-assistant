@@ -45,12 +45,36 @@ services:
     volumes:
       - redis_data:/data
 
+  # Tenancy/admin/analytics database (specs/002-backoffice-analytics) — deliberately
+  # separate from `mysql` above, which is PrestaShop's own database (Constitution
+  # Principle II: platform integration data must not couple to assistant-owned storage).
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-assistant}
+      POSTGRES_USER: ${POSTGRES_USER:-assistant}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-assistant}
+    ports:
+      - "5432:5432"
+    volumes:
+      - assistant_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-assistant}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   assistant-service:
     build:
-      context: ../backend
+      context: ..
+      dockerfile: chatbot/backend/Dockerfile
     depends_on:
-      - prestashop
-      - redis
+      prestashop:
+        condition: service_started
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     environment:
       PRESTASHOP_BASE_URL: http://prestashop/api
       # PrestaShop redirects any request whose Host header doesn't match its configured
@@ -58,13 +82,48 @@ services:
       # hostname "prestashop" rather than the browser-facing PS_DOMAIN below.
       PRESTASHOP_HOST_HEADER: ${PS_DOMAIN:-localhost:8080}
       REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-assistant}:${POSTGRES_PASSWORD:-assistant}@postgres:5432/${POSTGRES_DB:-assistant}
     env_file:
-      - path: ../backend/.env
+      - path: ../chatbot/backend/.env
         required: false
     ports:
       - "8000:8000"
+
+  # Admin/analytics API — a separate service from assistant-service above (no shared
+  # process, D6). Depends only on postgres, never on prestashop/redis/mysql.
+  backoffice-service:
+    build:
+      context: ..
+      dockerfile: backoffice/backend/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-assistant}:${POSTGRES_PASSWORD:-assistant}@postgres:5432/${POSTGRES_DB:-assistant}
+      ADMIN_CORS_ORIGINS: ${ADMIN_CORS_ORIGINS:-http://localhost:5173}
+      # This whole compose file is the local/demo stack (see docker/prestashop/README.md) —
+      # COOKIE_SECURE defaults to false here only because that stack is plain HTTP. A real
+      # deployment behind TLS must set COOKIE_SECURE=true (or just leave it unset — the
+      # backend's own default is already "true", see backoffice/backend/.env.example).
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    env_file:
+      - path: ../backoffice/backend/.env
+        required: false
+    ports:
+      - "8001:8001"
+
+  backoffice-frontend:
+    build:
+      context: ../backoffice/frontend
+      args:
+        VITE_API_BASE: ${BACKOFFICE_API_BASE:-http://localhost:8001}
+    depends_on:
+      - backoffice-service
+    ports:
+      - "5173:8080"
 
 volumes:
   prestashop_db:
   prestashop_data:
   redis_data:
+  assistant_db:

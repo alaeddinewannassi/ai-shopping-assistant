@@ -1,0 +1,4 @@
+.tmp/
+test-results/
+playwright-report/
+widget-demo/assistant-widget.js

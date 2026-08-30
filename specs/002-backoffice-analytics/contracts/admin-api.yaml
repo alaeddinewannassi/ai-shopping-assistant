@@ -1,0 +1,510 @@
+openapi: 3.0.3
+info:
+  title: AI Shopping Assistant — Backoffice Admin API
+  version: 0.1.0
+  description: |
+    Contract for backoffice/backend (specs/002-backoffice-analytics Phase 5), written before
+    the endpoints per Constitution Principle IV. Scoped to what T502-T511 actually built in
+    this pass — NOT the full plan.md §7 Phase 5 task list. Missing from this contract, and
+    therefore not yet implemented: TOTP/MFA (T502's optional part), adapter/LLM
+    "Test connection" (needs either a shared adapter package with chatbot/backend or an
+    internal-only check — an open design question, not silently skipped, see plan.md), user/
+    membership invitations (T508), CSV/JSON export (T510), timeseries/breakdowns/cost
+    analytics (blocked on Phase 4's deferred rollup tables).
+
+    Every mutating endpoint writes an `admin_audit` row (T509) — not modeled explicitly here
+    since it's a side effect, not part of the request/response contract.
+
+servers:
+  - url: http://localhost:8001
+    description: Local dev (uvicorn src.api.main:app --port 8001)
+
+security:
+  - cookieAuth: []
+
+paths:
+  /auth/login:
+    post:
+      operationId: login
+      security: []
+      summary: Exchange email/password for an access + refresh session (httpOnly cookies)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        "200":
+          description: Login succeeded — Set-Cookie headers carry the access/refresh JWTs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUserSummary"
+        "401":
+          description: Invalid email or password
+        "403":
+          description: Account disabled
+
+  /auth/refresh:
+    post:
+      operationId: refresh
+      summary: Exchange a valid refresh cookie for a new access cookie
+      responses:
+        "200": { description: New access token issued }
+        "401": { description: Refresh token missing, expired, or invalid }
+
+  /auth/logout:
+    post:
+      operationId: logout
+      summary: Clears both session cookies
+      responses:
+        "204": { description: Logged out }
+
+  /auth/me:
+    get:
+      operationId: getCurrentAdminUser
+      summary: The authenticated admin user + their tenant memberships
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUserSummary"
+        "401": { description: Not authenticated }
+
+  /tenants:
+    get:
+      operationId: listTenants
+      summary: List all tenants (superadmin only)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Tenant" }
+        "403": { description: Not a superadmin }
+    post:
+      operationId: createTenant
+      summary: Create a new tenant (superadmin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slug, name]
+              properties:
+                slug: { type: string }
+                name: { type: string }
+                plan: { type: string, default: standard }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tenant" }
+        "403": { description: Not a superadmin }
+        "409": { description: Slug already taken }
+
+  /tenants/{tenant_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+    get:
+      operationId: getTenant
+      summary: Tenant detail (any role on this tenant, or superadmin)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tenant" }
+        "403": { description: No membership on this tenant }
+        "404": { description: Unknown tenant }
+    patch:
+      operationId: updateTenant
+      summary: Update name/status/plan (owner/admin, or superadmin)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                status: { type: string, enum: [active, suspended] }
+                plan: { type: string }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tenant" }
+        "403": { description: Requires owner or admin role on this tenant }
+
+  /tenants/{tenant_id}/adapter-config:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+    get:
+      operationId: getAdapterConfig
+      summary: Adapter config with the credential masked (owner/admin)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdapterConfig" }
+        "404": { description: Not configured yet }
+    put:
+      operationId: upsertAdapterConfig
+      summary: Create/replace the adapter config (owner/admin). api_key is write-only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdapterConfigWrite" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdapterConfig" }
+
+  /tenants/{tenant_id}/llm-config:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+    get:
+      operationId: getLlmConfig
+      summary: LLM config with the credential masked (owner/admin)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LlmConfig" }
+        "404": { description: Not configured yet }
+    put:
+      operationId: upsertLlmConfig
+      summary: Create/replace the LLM config (owner/admin). api_key is write-only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LlmConfigWrite" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LlmConfig" }
+
+  /tenants/{tenant_id}/widget-keys:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+    get:
+      operationId: listWidgetKeys
+      summary: List widget keys (owner/admin)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/WidgetKey" }
+    post:
+      operationId: issueWidgetKey
+      summary: Issue a new widget key (owner/admin)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                allowed_origins:
+                  type: array
+                  items: { type: string }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WidgetKey" }
+
+  /tenants/{tenant_id}/widget-keys/{key_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+      - name: key_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      operationId: revokeWidgetKey
+      summary: Revoke a widget key (owner/admin)
+      responses:
+        "204": { description: Revoked (idempotent — also 204 if already revoked/unknown) }
+
+  /tenants/{tenant_id}/promo-rules:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+    get:
+      operationId: listPromoRules
+      summary: List active promo rules (owner/admin/analyst)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PromoRule" }
+
+  /tenants/{tenant_id}/promo-rules/{rule_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+      - name: rule_id
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      operationId: upsertPromoRule
+      summary: Create/replace a promo rule (owner/admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PromoRuleWrite" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PromoRule" }
+
+  /tenants/{tenant_id}/analytics/overview:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+      - $ref: "#/components/parameters/Start"
+      - $ref: "#/components/parameters/End"
+    get:
+      operationId: getAnalyticsOverview
+      summary: Overview panel (owner/admin/analyst)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OverviewMetrics" }
+
+  /tenants/{tenant_id}/analytics/funnel:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+      - $ref: "#/components/parameters/Start"
+      - $ref: "#/components/parameters/End"
+    get:
+      operationId: getAnalyticsFunnel
+      summary: Funnel panel (owner/admin/analyst)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FunnelMetrics" }
+
+  /tenants/{tenant_id}/sessions:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+    get:
+      operationId: listSessions
+      summary: Session list for the audit explorer (owner/admin/analyst/support)
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: outcome
+          in: query
+          schema: { type: string, enum: [browsing, cart, ordered, abandoned] }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SessionSummary" }
+
+  /tenants/{tenant_id}/sessions/{session_id}/events:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+      - name: session_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getSessionEvents
+      summary: Full event replay for one session (owner/admin/analyst/support)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AssistantEvent" }
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: assistant_admin_access
+
+  parameters:
+    TenantId:
+      name: tenant_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Start:
+      name: start
+      in: query
+      required: true
+      schema: { type: string, format: date-time }
+    End:
+      name: end
+      in: query
+      required: true
+      schema: { type: string, format: date-time }
+
+  schemas:
+    AdminUserSummary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        name: { type: string }
+        is_superadmin: { type: boolean }
+        memberships:
+          type: array
+          items:
+            type: object
+            properties:
+              tenant_id: { type: string, format: uuid }
+              role: { type: string, enum: [owner, admin, analyst, support] }
+
+    Tenant:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        status: { type: string, enum: [active, suspended] }
+        plan: { type: string }
+
+    AdapterConfigWrite:
+      type: object
+      required: [platform, base_url, api_key]
+      properties:
+        platform: { type: string, example: prestashop }
+        base_url: { type: string }
+        host_header: { type: string }
+        lang_id: { type: integer, default: 1 }
+        api_key: { type: string, description: Write-only, never returned }
+        default_customer_id: { type: string }
+        default_address_id: { type: string }
+        default_carrier_id: { type: string }
+        default_currency_id: { type: string }
+        default_order_state_id: { type: string }
+        payment_module: { type: string }
+        payment_label: { type: string }
+
+    AdapterConfig:
+      allOf:
+        - $ref: "#/components/schemas/AdapterConfigWrite"
+        - type: object
+          properties:
+            api_key: { type: string, description: "Always masked, e.g. \"••••1234\"" }
+            is_active: { type: boolean }
+
+    LlmConfigWrite:
+      type: object
+      required: [provider]
+      properties:
+        provider: { type: string, enum: [rule-based-stub, free-tier-hosted, hosted-paid] }
+        model: { type: string }
+        api_key: { type: string, description: Write-only, never returned }
+        monthly_token_budget: { type: integer }
+        budget_action: { type: string, enum: [warn, degrade_to_stub, block] }
+
+    LlmConfig:
+      allOf:
+        - $ref: "#/components/schemas/LlmConfigWrite"
+        - type: object
+          properties:
+            api_key: { type: string, description: "Always masked when set" }
+            is_active: { type: boolean }
+
+    WidgetKey:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        public_key: { type: string }
+        allowed_origins:
+          type: array
+          items: { type: string }
+        is_active: { type: boolean }
+        last_used_at: { type: string, format: date-time, nullable: true }
+
+    PromoRuleWrite:
+      type: object
+      required: [condition, target_code]
+      properties:
+        condition: { type: string }
+        target_code: { type: string }
+        priority: { type: integer, default: 0 }
+        stackable_with:
+          type: array
+          items: { type: string }
+        is_active: { type: boolean, default: true }
+
+    PromoRule:
+      allOf:
+        - $ref: "#/components/schemas/PromoRuleWrite"
+        - type: object
+          properties:
+            rule_id: { type: string }
+
+    OverviewMetrics:
+      type: object
+      properties:
+        session_count: { type: integer }
+        turn_count: { type: integer }
+        ordered_session_count: { type: integer }
+        conversion_rate: { type: number }
+        avg_turn_latency_ms: { type: number, nullable: true }
+        p95_turn_latency_ms: { type: number, nullable: true }
+        error_event_count: { type: integer }
+        error_rate: { type: number }
+
+    FunnelMetrics:
+      type: object
+      properties:
+        sessions: { type: integer }
+        discovery: { type: integer }
+        proposal: { type: integer }
+        confirmed: { type: integer }
+        cart_mutated: { type: integer }
+        checkout_proposed: { type: integer }
+        ordered: { type: integer }
+
+    SessionSummary:
+      type: object
+      properties:
+        session_id: { type: string }
+        started_at: { type: string, format: date-time }
+        last_seen_at: { type: string, format: date-time }
+        turn_count: { type: integer }
+        outcome: { type: string, enum: [browsing, cart, ordered, abandoned] }
+        cart_id: { type: string, nullable: true }
+        order_id: { type: string, nullable: true }
+
+    AssistantEvent:
+      type: object
+      properties:
+        turn_id: { type: string, format: uuid }
+        seq: { type: integer }
+        occurred_at: { type: string, format: date-time }
+        intent: { type: string }
+        action: { type: string }
+        outcome: { type: string }
+        details: { type: object }
+        turn_elapsed_ms: { type: integer, nullable: true }

@@ -13,12 +13,27 @@ see the Constitution's Principle III in
 
 ## Repository layout
 
+Two independently deployable projects share one repo, plus a small data layer between them:
+
 ```
-backend/    FastAPI service: dialogue/agent logic, CommerceAdapter implementations, tests
-widget/     Minimal embeddable chat widget (a single <assistant-chat-widget> custom element)
-docker/     docker-compose.yml + PrestaShop reference-store fixture notes
-specs/      Spec-kit artifacts: spec, plan, research, data model, contracts, tasks
+chatbot/
+  backend/         FastAPI service: dialogue/agent logic, CommerceAdapter implementations
+  widget/          Minimal embeddable chat widget (<assistant-chat-widget> custom element)
+backoffice/
+  backend/         FastAPI admin/analytics API — a separate process from chatbot/backend/
+  frontend/        Admin dashboard SPA (specs/002-backoffice-analytics Phase 6)
+tenancy-db/        Shared tenancy/admin data layer (models, repositories, Alembic migrations) —
+                   chatbot/backend/ only reads through it, backoffice/backend/ owns writes
+e2e/               Playwright suite driving a real conversation (Groq) through chatbot/
+                   and verifying it in backoffice/ — see e2e/README.md
+docker/            docker-compose.yml + PrestaShop reference-store fixture notes
+specs/             Spec-kit artifacts: spec, plan, research, data model, contracts, tasks
 ```
+
+One backoffice deployment administers many tenants; `chatbot/backend/` resolves each
+request's tenant from its widget key, so one running chatbot service can serve many
+storefronts. See [`specs/002-backoffice-analytics/plan.md`](specs/002-backoffice-analytics/plan.md)
+for the full multi-tenancy design.
 
 ## Quickstart
 
@@ -33,12 +48,14 @@ The short version:
 cd docker && docker compose up -d
 
 # 2. Configure the assistant service
-cp backend/.env.example backend/.env   # fill in PRESTASHOP_API_KEY, LLM_API_KEY, etc.
+cp chatbot/backend/.env.example chatbot/backend/.env   # fill in PRESTASHOP_API_KEY, LLM_API_KEY, etc.
 
-# 3. Run the backend locally (or `docker compose up -d assistant-service`)
-cd backend
+# 3. Install the shared tenancy-db package, then run the chatbot backend locally
+#    (or `docker compose up -d assistant-service`)
+cd tenancy-db && python -m venv .venv && source .venv/bin/activate && pip install -e '.[dev]' && deactivate
+cd ../chatbot/backend
 python -m venv .venv && source .venv/bin/activate
-pip install -e '.[dev]'
+pip install -e ../../tenancy-db && pip install -e '.[dev]'
 uvicorn src.api.chat:app --reload
 
 # 4. Build and try the widget
@@ -49,6 +66,10 @@ npm install && npm run build
 #   <assistant-chat-widget api-base="http://localhost:8000"></assistant-chat-widget>
 ```
 
+The backoffice (admin dashboard) is a separate project with its own setup —
+see [`backoffice/README.md`](backoffice/README.md), including how to migrate an existing
+single-tenant deployment into it without losing its promo rules.
+
 `LLM_PROVIDER=rule-based-stub` (the default for tests) needs no external API key at all and
 runs a deterministic keyword matcher — good for exercising the full flow with zero cost or
 network dependency before wiring up a real LLM.
@@ -56,7 +77,7 @@ network dependency before wiring up a real LLM.
 ## Running the tests
 
 ```bash
-cd backend
+cd chatbot/backend
 source .venv/bin/activate
 pytest tests/unit tests/contract tests/integration
 ```
@@ -68,7 +89,7 @@ automatically unless `PRESTASHOP_BASE_URL`/`PRESTASHOP_API_KEY` point at one tha
 reachable (see `docker/prestashop/README.md`).
 
 ```bash
-cd widget
+cd chatbot/widget
 npm test        # vitest smoke tests
 npm run lint     # eslint
 npm run build    # type-check + production bundle
@@ -84,3 +105,9 @@ the authoritative, up-to-date task-by-task status. `PrestaShopAdapter` is implem
 PrestaShop's official Webservice API docs but has not yet been integration-tested against a
 live store in this environment — run the contract test suite above against a real
 `docker compose up` stack before trusting it in production.
+
+The multi-tenant backoffice (`backoffice/`, `tenancy-db/`, specs/002-backoffice-analytics)
+has its core built through Phase 6 (tenancy, the analytics event pipeline, the admin API,
+and the dashboard UI) — see that plan's "Progress so far" note for exactly what's real
+versus deliberately deferred (a handful of dashboard pages, cost tracking, user invitations,
+adapter connection testing).
