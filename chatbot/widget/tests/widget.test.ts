@@ -144,6 +144,41 @@ describe("assistant-chat-widget", () => {
     expect(requestInit.headers["X-Assistant-Key"]).toBeUndefined();
   });
 
+  it("restores the visible transcript after a simulated page navigation", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        session_id: "s1",
+        reply: "Here's what I found: Classic T-Shirt ($19.99)",
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = document.createElement("assistant-chat-widget");
+    document.body.appendChild(first);
+    const firstShadow = first.shadowRoot!;
+    const input = firstShadow.querySelector<HTMLInputElement>("input")!;
+    const form = firstShadow.querySelector<HTMLFormElement>("form")!;
+    input.value = "show me t-shirts";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+    await vi.waitFor(() => {
+      expect(firstShadow.querySelectorAll(".message.assistant").length).toBe(1);
+    });
+
+    // A traditional storefront does a full page load on navigation — the old element (and
+    // its DOM-only transcript) is gone, exactly like a real navigation would destroy it.
+    // A fresh widget instance re-reads the SAME localStorage a real new page load would.
+    first.remove();
+    const second = document.createElement("assistant-chat-widget");
+    document.body.appendChild(second);
+    const secondShadow = second.shadowRoot!;
+
+    expect(secondShadow.querySelector(".message.user")?.textContent).toContain("show me t-shirts");
+    expect(secondShadow.querySelector(".message.assistant")?.textContent).toContain("Classic T-Shirt");
+    // Restoring history must not re-fetch or re-save it as if these were new messages.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("shows a friendly error message when the assistant service is unreachable", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
 

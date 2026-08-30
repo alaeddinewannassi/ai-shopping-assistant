@@ -86,15 +86,30 @@ function randomSessionId(): string {
   return `widget-${Math.random().toString(36).slice(2)}-${Date.now()}`;
 }
 
+interface StoredMessage {
+  text: string;
+  role: "user" | "assistant";
+  confirm: boolean;
+}
+
+// A traditional server-rendered storefront (like PrestaShop) does a full page load on every
+// navigation — the widget's whole DOM, including the chat panel, is destroyed and rebuilt
+// from scratch. `sessionId` already survives that via localStorage (below), so the
+// *backend's* cart/pending-action state was never actually lost — but the visibly rendered
+// transcript was, since it only ever lived in the DOM. This persists it the same way.
+const MAX_STORED_MESSAGES = 100;
+
 export class AssistantChatWidget extends HTMLElement {
   private sessionId: string;
   private messagesEl!: HTMLDivElement;
   private inputEl!: HTMLInputElement;
   private buttonEl!: HTMLButtonElement;
+  private messageHistory: StoredMessage[];
 
   constructor() {
     super();
     this.sessionId = this.getAttribute("session-id") || this.loadOrCreateSessionId();
+    this.messageHistory = this.loadMessageHistory();
   }
 
   private loadOrCreateSessionId(): string {
@@ -108,6 +123,33 @@ export class AssistantChatWidget extends HTMLElement {
     } catch {
       // localStorage unavailable (private mode, etc.) - a fresh id per page load is fine.
       return randomSessionId();
+    }
+  }
+
+  private get historyStorageKey(): string {
+    return `assistant-widget-messages-${this.sessionId}`;
+  }
+
+  private loadMessageHistory(): StoredMessage[] {
+    try {
+      const raw = window.localStorage.getItem(this.historyStorageKey);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      // Unavailable storage, or corrupted JSON from a previous version — start fresh
+      // rather than let a restore failure break the widget from loading at all.
+      return [];
+    }
+  }
+
+  private saveMessageHistory(): void {
+    try {
+      const trimmed = this.messageHistory.slice(-MAX_STORED_MESSAGES);
+      window.localStorage.setItem(this.historyStorageKey, JSON.stringify(trimmed));
+    } catch {
+      // Storage full/unavailable - the current page's transcript still renders fine;
+      // only cross-navigation persistence is lost.
     }
   }
 
@@ -133,6 +175,9 @@ export class AssistantChatWidget extends HTMLElement {
 
     this.messagesEl = document.createElement("div");
     this.messagesEl.className = "messages";
+    for (const stored of this.messageHistory) {
+      this.renderMessage(stored.text, stored.role, stored.confirm);
+    }
 
     const form = document.createElement("form");
     this.inputEl = document.createElement("input");
@@ -185,7 +230,10 @@ export class AssistantChatWidget extends HTMLElement {
     return this.getAttribute("tenant-key") || undefined;
   }
 
-  private appendMessage(text: string, role: "user" | "assistant", confirm = false): void {
+  /** DOM-only — renders one message bubble without touching stored history. Used both by
+   * appendMessage() (a genuinely new message) and connectedCallback() (replaying history
+   * already in storage, which must not be re-saved as if it were new). */
+  private renderMessage(text: string, role: "user" | "assistant", confirm: boolean): void {
     const el = document.createElement("div");
     el.className = `message ${role}${confirm ? " confirm" : ""}`;
     if (confirm) {
@@ -199,6 +247,12 @@ export class AssistantChatWidget extends HTMLElement {
     el.appendChild(textNode);
     this.messagesEl.appendChild(el);
     this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+  }
+
+  private appendMessage(text: string, role: "user" | "assistant", confirm = false): void {
+    this.renderMessage(text, role, confirm);
+    this.messageHistory.push({ text, role, confirm });
+    this.saveMessageHistory();
   }
 
   private async handleSend(): Promise<void> {
