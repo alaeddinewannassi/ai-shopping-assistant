@@ -108,6 +108,9 @@ def test_confirming_add_to_cart_mutates_cart(
 
     session = session_store.get_or_create("u2")
     assert session.pending_action is None  # spent after confirm
+    # A genuinely confirmed cart mutation is worth a real navigation, not a redundant link.
+    assert session.last_turn_auto_navigate_to_cart is True
+    assert session.last_turn_shows_cart_link is False
 
 
 # -- Scenario 3: declining leaves cart untouched, offers a corrected option -- #
@@ -287,3 +290,5 @@ def test_cart_action_marks_the_turn_as_cart_link_worthy(
     session = session_store.get_or_create("u15")
     assert session.last_turn_shows_cart_link is True
     assert session.last_turn_product_ids == []  # this is a cart link, not a product link
+    # The initial propose still needs a yes/no answer — never auto-navigate before that.
+    assert session.last_turn_auto_navigate_to_cart is False

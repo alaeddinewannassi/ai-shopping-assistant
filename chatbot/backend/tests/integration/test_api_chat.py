@@ -31,7 +31,9 @@ def test_chat_endpoint_routes_a_discovery_turn_end_to_end() -> None:
     assert body["session_id"] == "http-test-1"
     assert "T-Shirt" in body["reply"] or "shirt" in body["reply"].lower()
     assert body["needs_confirmation"] is False  # a plain search never proposes anything
-    assert body["product_links"] == [{"id": "prod-tshirt-1", "name": "Classic T-Shirt"}]
+    # Exactly one result — auto-navigate, not a redundant link to the same page.
+    assert body["product_links"] == []
+    assert body["auto_navigate_product_id"] == "prod-tshirt-1"
     assert body["show_cart_link"] is False
 
 
@@ -45,8 +47,11 @@ def test_chat_endpoint_routes_a_full_add_to_cart_confirmation_flow() -> None:
     # (session.pending_action), independent of how the reply happens to be phrased.
     assert propose.json()["needs_confirmation"] is True
     assert propose.json()["show_cart_link"] is True
+    assert propose.json()["auto_navigate_to_cart"] is False  # still needs a yes/no answer
 
     confirm = client.post("/chat", json={"session_id": session_id, "message": "yes"})
     assert "t-shirt" in confirm.json()["reply"].lower()
     assert confirm.json()["needs_confirmation"] is False  # spent — nothing left pending
-    assert confirm.json()["show_cart_link"] is True
+    # A genuinely confirmed mutation is worth a real navigation, not a redundant link.
+    assert confirm.json()["auto_navigate_to_cart"] is True
+    assert confirm.json()["show_cart_link"] is False

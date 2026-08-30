@@ -71,6 +71,12 @@ class ChatResponse(BaseModel):
     # what the chatbot just did (docker/README-two-stores.md's documented gap) — it's a
     # cross-check the shopper can use, not a claim of sync.
     show_cart_link: bool = False
+    # Real, automatic navigation (not just a link) — set only when exactly one product is
+    # unambiguously this turn's focus, or a cart mutation was genuinely confirmed (never on
+    # the initial propose). The widget checks window.prestashop.page before actually
+    # navigating, so it never redirects if the shopper is already looking at that page.
+    auto_navigate_product_id: str | None = None
+    auto_navigate_to_cart: bool = False
 
 
 def _check_redis() -> str:
@@ -150,6 +156,8 @@ def chat(
             for pid, name in zip(session.last_turn_product_ids, session.last_turn_product_names)
         ],
         show_cart_link=session.last_turn_shows_cart_link,
+        auto_navigate_product_id=session.last_turn_auto_navigate_product_id,
+        auto_navigate_to_cart=session.last_turn_auto_navigate_to_cart,
     )
 
 

@@ -8,6 +8,36 @@
 
 import { sendChatMessage, type ProductLink } from "./api";
 
+interface PrestashopPageContext {
+  page?: {
+    page_name?: string;
+    body_classes?: Record<string, boolean>;
+  };
+}
+
+/** True if the shopper is already looking at product `productId` — checked via
+ * window.prestashop.page (PrestaShop's own, stable, semantic page-context object; verified
+ * live: page_name is "product" with a "product-id-<id>" body class on that exact page).
+ * Never true if window.prestashop is absent (e.g. the widget embedded outside a PrestaShop
+ * page) — absent context means we can't confirm we're already there, so navigation proceeds. */
+function isOnProductPage(productId: string): boolean {
+  try {
+    const page = (window as unknown as { prestashop?: PrestashopPageContext }).prestashop?.page;
+    return page?.page_name === "product" && page?.body_classes?.[`product-id-${productId}`] === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Same idea for the cart page (page_name is "cart" — verified live). */
+function isOnCartPage(): boolean {
+  try {
+    return (window as unknown as { prestashop?: PrestashopPageContext }).prestashop?.page?.page_name === "cart";
+  } catch {
+    return false;
+  }
+}
+
 const CHAT_ICON = `<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>`;
 const CLOSE_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
 
@@ -325,14 +355,28 @@ export class AssistantChatWidget extends HTMLElement {
     this.buttonEl.disabled = true;
 
     try {
-      const { reply, needs_confirmation, product_links, show_cart_link } = await sendChatMessage(
-        this.apiBase,
-        this.sessionId,
-        message,
-        this.tenantKey,
-        this.customerEmail,
-      );
+      const {
+        reply,
+        needs_confirmation,
+        product_links,
+        show_cart_link,
+        auto_navigate_product_id,
+        auto_navigate_to_cart,
+      } = await sendChatMessage(this.apiBase, this.sessionId, message, this.tenantKey, this.customerEmail);
       this.appendMessage(reply, "assistant", needs_confirmation, product_links, show_cart_link);
+
+      // Real navigation, not just a link — only for an unambiguous single-product focus or
+      // a genuinely confirmed cart mutation (agent/dialogue.py's criteria), and only when
+      // the shopper isn't already on that exact page. The message above is already rendered
+      // and saved to history before this runs, so it's still there when the new page loads.
+      if (auto_navigate_product_id && !isOnProductPage(auto_navigate_product_id)) {
+        window.location.href = `${window.location.origin}/index.php?id_product=${encodeURIComponent(auto_navigate_product_id)}&controller=product`;
+        return;
+      }
+      if (auto_navigate_to_cart && !isOnCartPage()) {
+        window.location.href = `${window.location.origin}/index.php?controller=cart`;
+        return;
+      }
     } catch {
       this.appendMessage(
         "Sorry, I couldn't reach the assistant service right now. Please try again.",

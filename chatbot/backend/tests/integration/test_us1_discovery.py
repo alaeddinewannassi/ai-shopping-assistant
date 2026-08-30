@@ -164,6 +164,17 @@ class _ScriptedLLMClient:
         return facts
 
 
+class _LyingScriptedLLMClient(_ScriptedLLMClient):
+    """A real, confirmed failure mode (not hypothetical): asked to rephrase get_product_details'
+    own CLARIFY outcome (multiple candidates, nothing resolved), a real LLM once fabricated
+    "Got it — here's the Hummingbird printed sweater you asked about." — a false resolution
+    claim. Proves dialogue.py's routing never even calls phrase_reply for a CLARIFY outcome in
+    the first place — regardless of what any LLMClient's phrase_reply might say."""
+
+    def phrase_reply(self, facts: str, shopper_message: str, *, session_id: str | None = None) -> str:
+        return "Got it — here's the exact item you asked about."
+
+
 def test_ask_or_chat_returns_the_llms_text_directly(
     adapter: MockAdapter, session_store: SessionStore
 ) -> None:
@@ -244,28 +255,60 @@ def test_get_product_details_never_fabricates_an_answer_with_nothing_to_back_it(
 # -- Per-turn product/cart links (api/chat.py's ChatResponse.product_links/show_cart_link) #
 
 
-def test_search_records_product_links_for_this_turn(
+def test_single_result_search_sets_auto_navigate_not_a_link(
     adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
 ) -> None:
     handle_turn(_ctx(adapter, llm_client, session_store), "s14", "show me jackets")
 
     session = session_store.get_or_create("s14")
-    assert session.last_turn_product_ids == ["prod-jacket-1"]
-    assert session.last_turn_product_names == ["Blue Jacket"]
+    # Exactly one result — unambiguous enough to auto-navigate to; a link would be redundant.
+    assert session.last_turn_auto_navigate_product_id == "prod-jacket-1"
+    assert session.last_turn_product_ids == []
+    assert session.last_turn_product_names == []
     assert session.last_turn_shows_cart_link is False
 
 
-def test_product_links_do_not_linger_into_an_unrelated_later_turn(
+def test_multi_result_search_sets_links_not_auto_navigate(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    """Multiple results (both catalog products) are never auto-navigate-worthy — there's no
+    single unambiguous target to redirect to; links only."""
+    scripted = _ScriptedLLMClient(ActionCall(action_type="search_products", parameters={"query": ""}))
+    ctx = _ctx(adapter, scripted, session_store)
+
+    handle_turn(ctx, "s16", "show me everything")
+
+    session = session_store.get_or_create("s16")
+    assert len(session.last_turn_product_ids) > 1
+    assert session.last_turn_auto_navigate_product_id is None
+
+
+def test_auto_navigate_target_does_not_linger_into_an_unrelated_later_turn(
     adapter: MockAdapter, session_store: SessionStore
 ) -> None:
     ctx = _ctx(adapter, RuleBasedStubClient(), session_store)
     handle_turn(ctx, "s15", "show me jackets")
-    assert session_store.get_or_create("s15").last_turn_product_ids == ["prod-jacket-1"]
+    assert session_store.get_or_create("s15").last_turn_auto_navigate_product_id == "prod-jacket-1"
 
     scripted = _ScriptedLLMClient(ActionCall(action_type="ask_or_chat", parameters={"text": "Sure!"}))
     ctx2 = _ctx(adapter, scripted, session_store)
     handle_turn(ctx2, "s15", "thanks")
 
     session = session_store.get_or_create("s15")
-    assert session.last_turn_product_ids == []
-    assert session.last_turn_product_names == []
+    assert session.last_turn_auto_navigate_product_id is None
+
+
+def test_ambiguous_get_product_details_reply_is_never_handed_to_phrase_reply(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    scripted = _LyingScriptedLLMClient(
+        ActionCall(action_type="get_product_details", parameters={"raw_text": "what do you have"})
+    )
+    ctx = _ctx(adapter, scripted, session_store)
+
+    reply = handle_turn(ctx, "s17", "what do you have")
+
+    assert reply != "Got it — here's the exact item you asked about."
+    assert "did you mean" in reply.lower()
+    session = session_store.get_or_create("s17")
+    assert session.last_turn_auto_navigate_product_id is None  # genuinely unresolved

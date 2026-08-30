@@ -61,6 +61,11 @@ class ConversationSession:
     last_turn_product_ids: list[str] = field(default_factory=list)
     last_turn_product_names: list[str] = field(default_factory=list)
     last_turn_shows_cart_link: bool = False
+    # Set only when exactly one product is unambiguously this turn's focus, or a cart
+    # mutation was genuinely confirmed — the widget performs a real navigation for these
+    # (unless window.prestashop.page says the shopper is already there), not just a link.
+    last_turn_auto_navigate_product_id: str | None = None
+    last_turn_auto_navigate_to_cart: bool = False
     pending_action: PendingAction | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -156,6 +161,8 @@ class SessionStore:
                 last_turn_product_ids=data.get("last_turn_product_ids", []),
                 last_turn_product_names=data.get("last_turn_product_names", []),
                 last_turn_shows_cart_link=data.get("last_turn_shows_cart_link", False),
+                last_turn_auto_navigate_product_id=data.get("last_turn_auto_navigate_product_id"),
+                last_turn_auto_navigate_to_cart=data.get("last_turn_auto_navigate_to_cart", False),
                 pending_action=PendingAction(**pending) if pending else None,
                 created_at=data.get("created_at", time.time()),
                 updated_at=data.get("updated_at", time.time()),

@@ -441,33 +441,38 @@ def _maybe_suggest_promo(ctx: DialogueContext, session_id: str, reply: str) -> s
     return reply
 
 
-def _handle_confirm(ctx: DialogueContext, session_id: str) -> str:
+def _handle_confirm(ctx: DialogueContext, session_id: str) -> tuple[str, str | None]:
+    """Returns (reply, confirmed_action_type) — confirmed_action_type is the PendingAction's
+    own action_type ("add_cart_item"/"checkout"/...) ONLY on genuine success, None on every
+    failure/no-op path (including CartStateChangedError's re-prompt). _route_turn uses this
+    to decide whether to auto-navigate to the real cart page — never on anything short of
+    an actual, confirmed mutation."""
     assert ctx.pending_gate is not None
     session = ctx.session_store.get_or_create(session_id)
     pending = session.pending_action
     if pending is None:
         log_action(session_id, "confirm_pending_action", "confirm", "nothing_pending")
-        return "There's nothing pending for me to confirm right now."
+        return "There's nothing pending for me to confirm right now.", None
 
     try:
         result = ctx.pending_gate.confirm(session_id, pending.action_id)
     except PendingActionError:
         log_action(session_id, "confirm_pending_action", "confirm", "stale_or_missing")
-        return "That confirmation isn't valid anymore — could you tell me again what you'd like to do?"
+        return "That confirmation isn't valid anymore — could you tell me again what you'd like to do?", None
     except AdapterUnavailableError as exc:
         # T035a: never assume success, never fall back to a cache for a mutation.
         log_action(session_id, "confirm_pending_action", "confirm", "unavailable", details={"error": str(exc)[:500]})
         return (
             "I couldn't apply that change — the store is temporarily unreachable. "
             "Nothing was changed; please try again shortly."
-        )
+        ), None
     except OutOfStockError:
         log_action(session_id, "confirm_pending_action", "confirm", "out_of_stock")
-        return "Sorry, that item just went out of stock, so I couldn't complete that change."
+        return "Sorry, that item just went out of stock, so I couldn't complete that change.", None
     except CartStateChangedError:
         # FR-009 / US3 Scenario 4: re-validate and require a fresh confirmation instead of
         # retrying blindly or silently placing a mismatched order.
-        return _handle_checkout_state_changed(ctx, session_id)
+        return _handle_checkout_state_changed(ctx, session_id), None
 
     # details.action_type distinguishes a confirmed cart mutation from a confirmed checkout —
     # both share this same (intent, action, outcome) tuple otherwise, and the funnel query
@@ -485,11 +490,11 @@ def _handle_confirm(ctx: DialogueContext, session_id: str) -> str:
         return (
             f"Order placed! Your order id is {order.id}. "
             f"Total charged: ${order.grand_total:.2f}. Thank you for shopping with us!"
-        )
+        ), pending.action_type
 
     if result.cart is None:
-        return "Done!"
-    return build_cart_summary(result.cart, _products_by_id_for_cart(ctx, result.cart))
+        return "Done!", pending.action_type
+    return build_cart_summary(result.cart, _products_by_id_for_cart(ctx, result.cart)), pending.action_type
 
 
 def _handle_decline(ctx: DialogueContext, session_id: str) -> str:
@@ -522,6 +527,13 @@ _SKIP_PROMO_SUGGESTION_AFTER = {
 # discovery only. See _route_turn's comment for why cart/checkout/confirm/decline/promo never
 # are: a real test proved the model can fabricate a false mutation-completion claim.
 _PHRASABLE_ACTION_TYPES = {"search_products", "navigate_to", "get_product_details"}
+
+# The SECOND gate on phrase_reply, orthogonal to the action-type check above: even within a
+# read-only discovery action, only a genuinely resolved/positive outcome may be phrased.
+# CLARIFY (multiple candidates, nothing resolved), NO_MATCH, and UNAVAILABLE always stay
+# exact — a live test proved rephrasing a CLARIFY outcome fabricates a false resolution
+# claim, the discovery-side twin of the cart-mutation hallucination above.
+_PHRASABLE_DISCOVERY_KINDS = {DiscoveryKind.PRODUCTS, DiscoveryKind.NAVIGATE_CATEGORY, DiscoveryKind.PRODUCT_DETAILS}
 
 # Action types worth offering a real link to PrestaShop's own cart page for — every turn
 # that's cart/checkout-adjacent, regardless of outcome (even a clarifying question is worth
@@ -615,6 +627,20 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
     # change to handle_turn/_route_turn (which dozens of existing tests treat as plain str).
     product_links: list[tuple[str, str]] = []
     shows_cart_link = action.action_type in _CART_LINK_ACTION_TYPES
+    # Set only when exactly one product is unambiguously the focus of this turn (never for a
+    # multi-result list — which one would we even pick?) or a cart mutation was genuinely
+    # confirmed (never on the initial propose, which still needs a yes/no answer). The widget
+    # only actually navigates if window.prestashop.page says the shopper isn't already there.
+    auto_navigate_product_id: str | None = None
+    auto_navigate_to_cart = False
+    # Which of the discovery outcome kinds this turn actually produced, if any — a SECOND
+    # gate on phrase_reply below, tighter than just "the action type was read-only". A real
+    # test caught this exact gap: get_product_details' CLARIFY outcome (multiple candidates,
+    # nothing resolved) still got phrased into a confident "here's the sweater you asked
+    # about" — a false resolution claim, the same class of problem as the cart-mutation
+    # hallucination, just one step earlier. Only a genuinely resolved/positive outcome may
+    # be phrased; CLARIFY/NO_MATCH/UNAVAILABLE always stay exact templates.
+    discovery_outcome_kind: DiscoveryKind | None = None
 
     if action.action_type == "search_products":
         query = action.parameters.get("query", message)
@@ -622,8 +648,15 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         _record_navigation(ctx.session_store, session, outcome)
         log_action(session_id, action.action_type, "search_products", outcome.kind.value, details={"query": query})
         reply = render_discovery_reply(outcome)
+        discovery_outcome_kind = outcome.kind
         if outcome.kind == DiscoveryKind.PRODUCTS:
-            product_links = [(p.id, p.name) for p in outcome.products[:5]]
+            # Mutually exclusive with auto-navigate, not additive: a link to a page we're
+            # about to redirect to (or already on) is redundant — only show links for the
+            # genuinely ambiguous multi-result case.
+            if len(outcome.products) == 1:
+                auto_navigate_product_id = outcome.products[0].id
+            else:
+                product_links = [(p.id, p.name) for p in outcome.products[:5]]
 
     elif action.action_type == "navigate_to":
         target = action.parameters.get("target", message)
@@ -631,8 +664,12 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         _record_navigation(ctx.session_store, session, outcome)
         log_action(session_id, action.action_type, "navigate_to", outcome.kind.value, details={"target": target})
         reply = render_discovery_reply(outcome)
+        discovery_outcome_kind = outcome.kind
         if outcome.kind == DiscoveryKind.NAVIGATE_CATEGORY:
-            product_links = [(p.id, p.name) for p in outcome.products[:5]]
+            if len(outcome.products) == 1:
+                auto_navigate_product_id = outcome.products[0].id
+            else:
+                product_links = [(p.id, p.name) for p in outcome.products[:5]]
 
     elif action.action_type == "get_product_details":
         # Answers "what sizes/colors do you have?" with real catalog data — resolved via the
@@ -644,8 +681,11 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         _record_navigation(ctx.session_store, session, outcome)
         log_action(session_id, action.action_type, "get_product_details", outcome.kind.value)
         reply = render_discovery_reply(outcome)
+        discovery_outcome_kind = outcome.kind
         if outcome.kind == DiscoveryKind.PRODUCT_DETAILS:
-            product_links = [(p.id, p.name) for p in outcome.products]
+            # Always exactly one product by construction — always auto-navigate, never a
+            # redundant link to the page we're about to redirect to (or already on).
+            auto_navigate_product_id = outcome.products[0].id
 
     elif action.action_type == "propose_add_to_cart" and ctx.cart_handler and ctx.pending_gate:
         reply = _handle_propose_add_to_cart(
@@ -669,7 +709,9 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         reply = _handle_apply_promo(ctx, session_id, action.parameters.get("raw_text", message))
 
     elif action.action_type == "confirm_pending_action" and ctx.pending_gate:
-        reply = _handle_confirm(ctx, session_id)
+        reply, confirmed_type = _handle_confirm(ctx, session_id)
+        if confirmed_type in {"add_cart_item", "update_cart_item", "remove_cart_item"}:
+            auto_navigate_to_cart = True
 
     elif action.action_type == "decline_pending_action" and ctx.pending_gate:
         reply = _handle_decline(ctx, session_id)
@@ -699,7 +741,11 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
     # widget.ts — so no tenant-specific public storefront URL needs configuring here).
     session.last_turn_product_ids = [pid for pid, _ in product_links]
     session.last_turn_product_names = [name for _, name in product_links]
-    session.last_turn_shows_cart_link = shows_cart_link
+    # Mutually exclusive with auto-navigate-to-cart — a link to the page we're about to
+    # redirect to (or already on) is redundant.
+    session.last_turn_shows_cart_link = shows_cart_link and not auto_navigate_to_cart
+    session.last_turn_auto_navigate_product_id = auto_navigate_product_id
+    session.last_turn_auto_navigate_to_cart = auto_navigate_to_cart
     ctx.session_store.save(session)
 
     if action.action_type == "ask_or_chat":
@@ -707,17 +753,28 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         # second call for no benefit.
         return final_reply
 
-    # Natural LLM phrasing is scoped to read-only discovery replies ONLY. A live test proved
-    # the real, concrete risk of going further: asked to rephrase what was actually an
-    # unresolved AMBIGUOUS_PRODUCT clarifying question (nothing proposed, session.pending_action
-    # was None), the model fabricated "Got it — I've added the Hummingbird printed sweater in
-    # size M to your cart." — a false claim of a mutation that never happened. That's not a
-    # stylistic risk, it's a direct violation of confirm-before-mutate (Constitution Principle
-    # III): a shopper could believe an order/cart change occurred when it didn't. So cart/
-    # checkout/promo/confirm/decline replies, and ANY reply that now carries a fresh pending
-    # confirmation (e.g. a proactive promo suggestion tacked onto an otherwise read-only
-    # reply), always stay exact templates — never handed to phrase_reply.
-    if action.action_type not in _PHRASABLE_ACTION_TYPES or session.pending_action is not None:
+    # Natural LLM phrasing is scoped to read-only discovery replies ONLY, and only a
+    # genuinely resolved/positive one at that. Two live tests each caught a real, concrete
+    # hallucination going further:
+    #  1. Rephrasing what was actually an unresolved AMBIGUOUS_PRODUCT clarifying question
+    #     (nothing proposed, session.pending_action was None) fabricated "Got it — I've
+    #     added the Hummingbird printed sweater in size M to your cart." — a false claim of
+    #     a mutation that never happened.
+    #  2. Rephrasing get_product_details' own CLARIFY outcome (multiple candidates, nothing
+    #     resolved) fabricated "Got it — here's the Hummingbird printed sweater you asked
+    #     about." — a false resolution claim, one step earlier but the same failure mode.
+    # Both are direct violations of confirm-before-mutate / never-fabricate-catalog-facts
+    # (Constitution Principle III): a shopper could believe something happened, or was
+    # found, when it wasn't. So cart/checkout/promo/confirm/decline replies, any reply that
+    # now carries a fresh pending confirmation (e.g. a proactive promo suggestion tacked onto
+    # an otherwise read-only reply), and any discovery outcome that ISN'T a genuinely
+    # resolved PRODUCTS/NAVIGATE_CATEGORY/PRODUCT_DETAILS result (CLARIFY/NO_MATCH/
+    # UNAVAILABLE always stay exact) — all always stay exact templates, never phrase_reply.
+    if (
+        action.action_type not in _PHRASABLE_ACTION_TYPES
+        or discovery_outcome_kind not in _PHRASABLE_DISCOVERY_KINDS
+        or session.pending_action is not None
+    ):
         return final_reply
 
     # `final_reply` here is exact, deterministic, already-correct ground truth (search

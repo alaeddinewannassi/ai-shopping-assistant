@@ -11,6 +11,8 @@ export interface ChatResponse {
   needs_confirmation: boolean;
   product_links: ProductLink[];
   show_cart_link: boolean;
+  auto_navigate_product_id: string | null;
+  auto_navigate_to_cart: boolean;
 }
 
 export async function sendChatMessage(

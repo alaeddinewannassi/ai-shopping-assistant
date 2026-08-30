@@ -255,6 +255,145 @@ describe("assistant-chat-widget", () => {
     expect(link.href).toBe(`${window.location.origin}/index.php?controller=cart`);
   });
 
+  describe("auto-navigation", () => {
+    let originalLocation: Location;
+    let setHref: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      // jsdom doesn't implement real navigation — replace window.location with a spy-able
+      // stand-in so we can assert what the widget tried to navigate to, without jsdom's
+      // "Not implemented: navigation" error.
+      originalLocation = window.location;
+      setHref = vi.fn();
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        value: { origin: originalLocation.origin, set href(v: string) { setHref(v); } },
+      });
+    });
+
+    afterEach(() => {
+      Object.defineProperty(window, "location", { configurable: true, value: originalLocation });
+    });
+
+    it("auto-navigates to a single resolved product's real page", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          session_id: "s1",
+          reply: "Here's what I found: Classic T-Shirt ($19.99)",
+          needs_confirmation: false,
+          product_links: [{ id: "prod-tshirt-1", name: "Classic T-Shirt" }],
+          show_cart_link: false,
+          auto_navigate_product_id: "prod-tshirt-1",
+          auto_navigate_to_cart: false,
+        }),
+      }));
+
+      const widget = document.createElement("assistant-chat-widget");
+      document.body.appendChild(widget);
+      const shadow = widget.shadowRoot!;
+      const input = shadow.querySelector<HTMLInputElement>("input")!;
+      const form = shadow.querySelector<HTMLFormElement>("form")!;
+      input.value = "show me the classic t-shirt";
+      form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+      await vi.waitFor(() => {
+        expect(setHref).toHaveBeenCalled();
+      });
+      expect(setHref).toHaveBeenCalledWith(
+        `${originalLocation.origin}/index.php?id_product=prod-tshirt-1&controller=product`,
+      );
+    });
+
+    it("does not auto-navigate when already on that product's page", async () => {
+      vi.stubGlobal("prestashop", {
+        page: { page_name: "product", body_classes: { "product-id-prod-tshirt-1": true } },
+      });
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          session_id: "s1",
+          reply: "Here's what I found: Classic T-Shirt ($19.99)",
+          needs_confirmation: false,
+          product_links: [{ id: "prod-tshirt-1", name: "Classic T-Shirt" }],
+          show_cart_link: false,
+          auto_navigate_product_id: "prod-tshirt-1",
+          auto_navigate_to_cart: false,
+        }),
+      }));
+
+      const widget = document.createElement("assistant-chat-widget");
+      document.body.appendChild(widget);
+      const shadow = widget.shadowRoot!;
+      const input = shadow.querySelector<HTMLInputElement>("input")!;
+      const form = shadow.querySelector<HTMLFormElement>("form")!;
+      input.value = "show me the classic t-shirt";
+      form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+      await vi.waitFor(() => {
+        expect(shadow.querySelectorAll(".message.assistant").length).toBe(1);
+      });
+      expect(setHref).not.toHaveBeenCalled();
+    });
+
+    it("auto-navigates to the cart page after a confirmed cart mutation", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          session_id: "s1",
+          reply: "Added! Your cart now has 1 x Classic T-Shirt.",
+          needs_confirmation: false,
+          product_links: [],
+          show_cart_link: true,
+          auto_navigate_product_id: null,
+          auto_navigate_to_cart: true,
+        }),
+      }));
+
+      const widget = document.createElement("assistant-chat-widget");
+      document.body.appendChild(widget);
+      const shadow = widget.shadowRoot!;
+      const input = shadow.querySelector<HTMLInputElement>("input")!;
+      const form = shadow.querySelector<HTMLFormElement>("form")!;
+      input.value = "yes";
+      form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+      await vi.waitFor(() => {
+        expect(setHref).toHaveBeenCalled();
+      });
+      expect(setHref).toHaveBeenCalledWith(`${originalLocation.origin}/index.php?controller=cart`);
+    });
+
+    it("does not auto-navigate to cart when already on the cart page", async () => {
+      vi.stubGlobal("prestashop", { page: { page_name: "cart" } });
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          session_id: "s1",
+          reply: "Added! Your cart now has 1 x Classic T-Shirt.",
+          needs_confirmation: false,
+          product_links: [],
+          show_cart_link: true,
+          auto_navigate_product_id: null,
+          auto_navigate_to_cart: true,
+        }),
+      }));
+
+      const widget = document.createElement("assistant-chat-widget");
+      document.body.appendChild(widget);
+      const shadow = widget.shadowRoot!;
+      const input = shadow.querySelector<HTMLInputElement>("input")!;
+      const form = shadow.querySelector<HTMLFormElement>("form")!;
+      input.value = "yes";
+      form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+      await vi.waitFor(() => {
+        expect(shadow.querySelectorAll(".message.assistant").length).toBe(1);
+      });
+      expect(setHref).not.toHaveBeenCalled();
+    });
+  });
+
   it("restores the visible transcript after a simulated page navigation", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
