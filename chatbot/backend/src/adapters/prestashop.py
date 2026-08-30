@@ -257,9 +257,22 @@ class PrestaShopAdapter:
         if query:
             tokens = [t for t in query.lower().split() if len(t) > 2]
             if tokens:
+                # A plain `t in name` substring check missed simple singular/plural
+                # mismatches ("posters" vs. a catalog name containing "poster") — mirrors
+                # MockAdapter.search_products' _fold()/bidirectional per-word matching so
+                # both adapters behave consistently against the same query.
+                def _fold(word: str) -> str:
+                    return word[:-1] if word.endswith("s") and len(word) > 3 else word
+
+                folded_tokens = [_fold(t) for t in tokens]
                 products = [
                     p for p in products
-                    if any(t in p.name.lower() for t in tokens)
+                    if any(
+                        _fold(t) in name_token or name_token in _fold(t)
+                        for t in folded_tokens
+                        for name_token in p.name.lower().replace("-", " ").split()
+                        if len(name_token) > 2
+                    )
                 ]
 
         color = filters.get("color")
