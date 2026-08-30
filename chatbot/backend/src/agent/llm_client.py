@@ -304,7 +304,7 @@ class FreeTierHostedLLMClient:
         client: httpx.Client | None = None,
     ) -> None:
         self.api_key = api_key or os.environ.get("LLM_API_KEY")
-        self.model = model or os.environ.get("LLM_MODEL", "llama-3.3-70b-versatile")
+        self.model = model or os.environ.get("LLM_MODEL", "openai/gpt-oss-120b")
         if not self.api_key:
             raise ValueError(
                 "LLM_API_KEY is required for the free-tier-hosted provider "

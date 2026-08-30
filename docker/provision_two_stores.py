@@ -96,7 +96,7 @@ def _seed_store(db, args: argparse.Namespace, llm_api_key: str | None, spec: dic
     TenantLLMConfigRepository(db).upsert(
         tenant.id,
         provider="free-tier-hosted" if llm_api_key else "rule-based-stub",
-        model=os.environ.get("LLM_MODEL", "llama-3.3-70b-versatile"),
+        model=os.environ.get("LLM_MODEL", "openai/gpt-oss-120b"),
         api_key_encrypted=encrypt_secret(llm_api_key) if llm_api_key else None,
     )
 

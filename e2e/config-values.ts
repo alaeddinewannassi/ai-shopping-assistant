@@ -26,7 +26,7 @@ export const APP_ENCRYPTION_KEY = "e2e-test-only-encryption-key-not-for-producti
 export const JWT_SECRET = "e2e-test-only-jwt-secret-not-for-production-use";
 
 export const LLM_API_KEY = process.env.LLM_API_KEY || "no-key-configured-see-e2e-readme";
-export const LLM_MODEL = process.env.LLM_MODEL || "llama-3.3-70b-versatile";
+export const LLM_MODEL = process.env.LLM_MODEL || "openai/gpt-oss-120b";
 
 export const CHATBOT_BACKEND_DIR = path.join(ROOT, "..", "chatbot", "backend");
 export const BACKOFFICE_BACKEND_DIR = path.join(ROOT, "..", "backoffice", "backend");

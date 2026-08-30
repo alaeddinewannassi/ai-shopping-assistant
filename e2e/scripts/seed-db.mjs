@@ -30,7 +30,7 @@ const SEED_RESULT_PATH = path.join(TMP_DIR, "seed-result.json");
 const DATABASE_URL = `sqlite:///${DB_PATH}`;
 const APP_ENCRYPTION_KEY = "e2e-test-only-encryption-key-not-for-production-use";
 const LLM_API_KEY = process.env.LLM_API_KEY || "no-key-configured-see-e2e-readme";
-const LLM_MODEL = process.env.LLM_MODEL || "llama-3.3-70b-versatile";
+const LLM_MODEL = process.env.LLM_MODEL || "openai/gpt-oss-120b";
 
 const BACKOFFICE_BACKEND_PYTHON = path.join(ROOT, "..", "backoffice", "backend", ".venv", "bin", "python");
 

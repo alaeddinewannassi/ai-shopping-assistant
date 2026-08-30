@@ -70,7 +70,7 @@ def _seed_store(db, llm_api_key: str, spec: dict) -> dict:
     TenantLLMConfigRepository(db).upsert(
         tenant.id,
         provider="free-tier-hosted",
-        model=os.environ.get("LLM_MODEL", "llama-3.3-70b-versatile"),
+        model=os.environ.get("LLM_MODEL", "openai/gpt-oss-120b"),
         api_key_encrypted=encrypt_secret(llm_api_key),
     )
     TenantPromoRuleRepository(db).upsert_rule(
