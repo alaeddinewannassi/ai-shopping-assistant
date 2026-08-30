@@ -49,6 +49,10 @@ _STOPWORDS = {
     "show", "me", "the", "a", "an", "please", "for", "with", "under", "over", "some", "any",
     "find", "search", "looking", "want", "need", "to", "category", "page", "products",
     "product", "of",
+    # Filler words from a general "what do you have?" phrasing — without these, a leftover
+    # word like "available" gets treated as a real search keyword and matched (or not)
+    "what", "are", "is", "available", "have", "has", "got", "all", "everything", "your",
+    "you", "do", "does", "sell", "carry", "stock", "offer",
 }
 
 
@@ -212,8 +216,8 @@ class DiscoveryIntentHandler:
 
 _QUANTITY_PATTERN = re.compile(r"(?<!\$)\b(\d+)\b")
 _CART_STOPWORDS = _STOPWORDS | {
-    "add", "cart", "my", "remove", "delete", "update", "change", "set", "from", "quantity",
-    "qty", "in",
+    "add", "cart", "card", "my", "remove", "delete", "update", "change", "set", "from",
+    "quantity", "qty", "in",
 }
 
 
@@ -280,6 +284,18 @@ class CartIntentHandler:
 
         if not products:
             return CartResolution(kind=CartResolutionKind.NOT_FOUND)
+        if len(products) > 1:
+            # search_products is deliberately permissive for open-ended discovery (ANY one
+            # token matching is enough) — but resolving what to actually ADD needs the
+            # opposite: a shopper naming one specific item (even an exact full name) shouldn't
+            # become "ambiguous" just because every candidate happens to share one common word
+            # ("hummingbird"). Narrow to products matching EVERY token before treating this as
+            # genuine ambiguity; if that doesn't land on exactly one, fall back to the full list.
+            strict_tokens = [t for t in term.lower().split() if len(t) > 2]
+            if strict_tokens:
+                narrowed = [p for p in products if all(t in p.name.lower() for t in strict_tokens)]
+                if len(narrowed) == 1:
+                    products = narrowed
         if len(products) > 1:
             return CartResolution(
                 kind=CartResolutionKind.AMBIGUOUS_PRODUCT, candidates=[p.name for p in products[:5]]
