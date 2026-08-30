@@ -9,6 +9,7 @@ path allowed to mutate the cart, research.md §9.3).
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 
@@ -17,6 +18,7 @@ from src.adapters.base import (
     CartStateChangedError,
     CommerceAdapter,
     OutOfStockError,
+    ProductNotFoundError,
 )
 from src.agent.intents import (
     CartIntentHandler,
@@ -27,7 +29,7 @@ from src.agent.intents import (
     PromoIntentHandler,
     PromoResolutionKind,
 )
-from src.agent.llm_client import LLMClient
+from src.agent.llm_client import ActionCall, LLMClient
 from src.agent.pending import PendingActionError, PendingActionGate
 from src.agent.recap import (
     build_add_to_cart_recap,
@@ -164,6 +166,71 @@ def _products_by_id_for_cart(ctx: DialogueContext, cart) -> dict:
         except Exception:  # noqa: BLE001 - best-effort display name lookup only
             continue
     return products_by_id
+
+
+# A bare number ("2", "3 please") replying to an add_cart_item proposal still awaiting
+# yes/no is unambiguous by construction — there is exactly one pending proposal and exactly
+# one number, no product/variant guessing needed at all. A real LLM, given no better tool for
+# "adjust the quantity of what you just proposed," classified this as propose_update_cart
+# instead — a poor fit, since nothing is in the cart yet to update ("I couldn't find that
+# item in your cart"). Resolved deterministically here instead, matching this codebase's
+# existing posture that mutation-adjacent decisions should be structural where a structural
+# answer exists (Constitution Principle III), not left to a model's guess — and the LLM isn't
+# even called for a turn this fires on.
+_BARE_QUANTITY_REPLY = re.compile(r"^\s*(\d+)\s*(?:please|pcs?|items?)?\s*[.!]?\s*$", re.IGNORECASE)
+
+
+def _pending_add_quantity_override(session: ConversationSession, message: str) -> int | None:
+    """Returns the shopper's requested new quantity IFF this turn is a bare-number reply to
+    a still-open add_cart_item proposal, else None (falls through to normal LLM routing)."""
+    pending = session.pending_action
+    if pending is None or pending.action_type != "add_cart_item":
+        return None
+    match = _BARE_QUANTITY_REPLY.match(message)
+    if match is None:
+        return None
+    return max(1, int(match.group(1)))
+
+
+def _handle_pending_add_quantity_override(ctx: DialogueContext, session_id: str, quantity: int) -> str:
+    """Replaces the currently-pending add_cart_item proposal with the SAME product/variant at
+    a new quantity. Reuses the pending action's own stored product_id/variant_id directly —
+    never re-resolved from the shopper's bare "2" — so this can never accidentally re-propose
+    a DIFFERENT item than the one actually being adjusted."""
+    assert ctx.pending_gate is not None
+    session = ctx.session_store.get_or_create(session_id)
+    pending = session.pending_action
+    assert pending is not None and pending.action_type == "add_cart_item"
+    product_id = pending.parameters["product_id"]
+    variant_id = pending.parameters["variant_id"]
+
+    try:
+        product = ctx.adapter.get_product(product_id)
+    except AdapterUnavailableError as exc:
+        log_action(session_id, "propose_add_to_cart", "get_product", "unavailable", details={"error": str(exc)[:500]})
+        return (
+            "I can't reach the store's catalog right now, so I can't verify that product. "
+            "Please try again in a moment."
+        )
+    except ProductNotFoundError:
+        return "I couldn't find a product matching that — could you tell me its name?"
+
+    variant = next((v for v in product.variants if v.id == variant_id), None)
+    if variant is None:
+        return "I couldn't find a product matching that — could you tell me its name?"
+
+    recap = build_add_to_cart_recap(product, variant, quantity)
+    action = ctx.pending_gate.propose(
+        session_id,
+        "add_cart_item",
+        {"product_id": product.id, "variant_id": variant.id, "quantity": quantity},
+        recap,
+    )
+    log_action(
+        session_id, "propose_add_to_cart", "propose", "pending",
+        details={"action_id": action.action_id, "quantity_override": quantity},
+    )
+    return f"{recap} (reply 'yes' to confirm or 'no' to cancel)"
 
 
 def _handle_propose_add_to_cart(
@@ -654,9 +721,16 @@ def _build_llm_context(session: ConversationSession) -> dict:
 
 def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
     session = ctx.session_store.get_or_create(session_id)
-    action = ctx.llm_client.parse_turn(
-        message, context=_build_llm_context(session), session_id=session_id
-    )
+
+    pending_quantity_override = _pending_add_quantity_override(session, message)
+    if pending_quantity_override is not None and ctx.cart_handler and ctx.pending_gate:
+        # Deterministic fast path — see _pending_add_quantity_override's docstring. The LLM
+        # is never even asked to classify this turn: there's nothing for it to judge.
+        action = ActionCall(action_type="propose_add_to_cart", parameters={"raw_text": message})
+    else:
+        action = ctx.llm_client.parse_turn(
+            message, context=_build_llm_context(session), session_id=session_id
+        )
 
     # Populated by the branches below, then written onto the session at the very end so
     # api/chat.py can turn them into real product/cart links after handle_turn returns —
@@ -725,17 +799,20 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
             auto_navigate_product_id = outcome.products[0].id
 
     elif action.action_type == "propose_add_to_cart" and ctx.cart_handler and ctx.pending_gate:
-        # An open "which size/color?" question takes priority over last_shown_product_ids —
-        # a bare follow-up like "size S white" answers THAT question, not a fresh reference to
-        # whatever was most recently searched/shown (which may be stale/unrelated by now).
-        reference_ids = (
-            [session.pending_variant_product_id]
-            if session.pending_variant_product_id
-            else session.last_shown_product_ids
-        )
-        reply = _handle_propose_add_to_cart(
-            ctx, session_id, action.parameters.get("raw_text", message), reference_ids
-        )
+        if pending_quantity_override is not None:
+            reply = _handle_pending_add_quantity_override(ctx, session_id, pending_quantity_override)
+        else:
+            # An open "which size/color?" question takes priority over last_shown_product_ids
+            # — a bare follow-up like "size S white" answers THAT question, not a fresh
+            # reference to whatever was most recently searched/shown (may be stale/unrelated).
+            reference_ids = (
+                [session.pending_variant_product_id]
+                if session.pending_variant_product_id
+                else session.last_shown_product_ids
+            )
+            reply = _handle_propose_add_to_cart(
+                ctx, session_id, action.parameters.get("raw_text", message), reference_ids
+            )
 
     elif action.action_type == "propose_update_cart" and ctx.cart_handler and ctx.pending_gate:
         reply = _handle_propose_cart_line_change(

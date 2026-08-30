@@ -437,3 +437,61 @@ def test_second_propose_survives_to_be_confirmed_against_a_non_aliasing_session_
     cart = adapter.get_cart("u17")
     assert len(cart.lines) == 1
     assert cart.lines[0].quantity == 2  # the SECOND propose, not a stale/wiped first one
+
+
+# -- Bare quantity reply adjusts the still-pending add proposal, not the (empty) cart ------ #
+
+
+def test_bare_quantity_reply_adjusts_the_pending_add_proposal(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    """Regression test for a real bug reported from live testing: proposing an add, then
+    replying with just a new quantity ("2") to adjust it before confirming got classified as
+    propose_update_cart by a real LLM — a poor fit, since nothing is in the cart yet to
+    update ("I couldn't find that item in your cart"). A bare-number reply to a still-open
+    add_cart_item proposal is resolved deterministically instead (dialogue.py's
+    _pending_add_quantity_override), reusing the pending proposal's own stored product/
+    variant rather than re-resolving from the shopper's bare "2" — the LLM is never even
+    asked to classify this turn."""
+    ctx = _ctx(adapter, llm_client, session_store)
+    handle_turn(ctx, "u19", "add the red classic t-shirt to my cart")
+
+    reply = handle_turn(ctx, "u19", "2")
+
+    assert "couldn't find that item in your cart" not in reply.lower()
+    assert "2 x Classic T-Shirt" in reply
+    assert "confirm" in reply.lower() or "yes" in reply.lower()
+    assert adapter.get_cart("u19").lines == []  # still nothing confirmed yet
+
+    confirm_reply = handle_turn(ctx, "u19", "yes")
+
+    assert "Classic T-Shirt" in confirm_reply
+    cart = adapter.get_cart("u19")
+    assert len(cart.lines) == 1
+    assert cart.lines[0].quantity == 2
+    assert cart.lines[0].variant_id == "var-tshirt-1-red-m"
+
+
+def test_bare_quantity_with_trailing_please_also_adjusts_the_pending_proposal(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    ctx = _ctx(adapter, llm_client, session_store)
+    handle_turn(ctx, "u20", "add the red classic t-shirt to my cart")
+
+    reply = handle_turn(ctx, "u20", "3 please")
+
+    assert "3 x Classic T-Shirt" in reply
+
+
+def test_bare_quantity_with_no_pending_add_falls_through_to_normal_routing(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    """The deterministic override only fires when an add_cart_item proposal is actually
+    open — with nothing pending, a bare "2" is just an ordinary (if odd) message, handled
+    however normal routing would otherwise handle it."""
+    ctx = _ctx(adapter, llm_client, session_store)
+
+    reply = handle_turn(ctx, "u21", "2")
+
+    assert "x Classic T-Shirt" not in reply
+    assert "x Blue Jacket" not in reply
