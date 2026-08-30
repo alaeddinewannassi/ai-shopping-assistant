@@ -196,3 +196,43 @@ def test_a_real_search_result_is_remembered_as_context_for_the_next_turn(
 
     session = session_store.get_or_create("s10")
     assert "Blue Jacket" in session.last_shown_products
+
+
+def test_get_product_details_reports_real_variant_data_for_the_last_shown_product(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    """Regression test for a real bug: asking "what sizes do you have" right after a search
+    result was being misrouted through search_products, which rewrote the query using
+    context ("Hummingbird printed t-shirt sizes") and matched unrelated products instead of
+    answering the question. get_product_details answers it directly with real data."""
+    session = session_store.get_or_create("s12")
+    session.last_shown_product_ids = ["prod-jacket-1"]
+    session_store.save(session)
+
+    scripted = _ScriptedLLMClient(
+        ActionCall(action_type="get_product_details", parameters={"raw_text": "what sizes do you have"})
+    )
+    ctx = _ctx(adapter, scripted, session_store)
+
+    reply = handle_turn(ctx, "s12", "what sizes do you have")
+
+    assert "Blue Jacket" in reply
+    assert "size: M" in reply
+    assert "size: L" in reply
+    assert "out of stock" in reply  # the L variant is out of stock — a real, not guessed, fact
+
+
+def test_get_product_details_never_fabricates_an_answer_with_nothing_to_back_it(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    scripted = _ScriptedLLMClient(
+        ActionCall(
+            action_type="get_product_details",
+            parameters={"raw_text": "what sizes does the completely nonexistent thing have"},
+        )
+    )
+    ctx = _ctx(adapter, scripted, session_store)
+
+    reply = handle_turn(ctx, "s13", "what sizes does the completely nonexistent thing have")
+
+    assert "couldn't find" in reply.lower()

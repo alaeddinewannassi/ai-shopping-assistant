@@ -114,6 +114,18 @@ def render_discovery_reply(outcome: DiscoveryOutcome) -> str:
             "Please try again in a moment."
         )
 
+    if outcome.kind == DiscoveryKind.PRODUCT_DETAILS:
+        assert outcome.products
+        product = outcome.products[0]
+        if not product.variants:
+            return f"{product.name} is ${product.base_price:.2f} — it doesn't have size/color options."
+        options = []
+        for variant in product.variants:
+            attrs = ", ".join(f"{k}: {v}" for k, v in variant.attributes.items())
+            status = "in stock" if variant.in_stock else "out of stock"
+            options.append(f"{attrs} ({status})")
+        return f"{product.name} (${product.base_price:.2f}) comes in: {'; '.join(options)}."
+
     return "I'm not sure how to help with that yet."  # pragma: no cover - exhaustive enum
 
 
@@ -565,15 +577,28 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
     )
 
     if action.action_type == "search_products":
-        outcome = ctx.discovery_handler.handle_search(action.parameters.get("query", message))
+        query = action.parameters.get("query", message)
+        outcome = ctx.discovery_handler.handle_search(query)
         _record_navigation(ctx.session_store, session, outcome)
-        log_action(session_id, action.action_type, "search_products", outcome.kind.value)
+        log_action(session_id, action.action_type, "search_products", outcome.kind.value, details={"query": query})
         reply = render_discovery_reply(outcome)
 
     elif action.action_type == "navigate_to":
-        outcome = ctx.discovery_handler.handle_navigate(action.parameters.get("target", message))
+        target = action.parameters.get("target", message)
+        outcome = ctx.discovery_handler.handle_navigate(target)
         _record_navigation(ctx.session_store, session, outcome)
-        log_action(session_id, action.action_type, "navigate_to", outcome.kind.value)
+        log_action(session_id, action.action_type, "navigate_to", outcome.kind.value, details={"target": target})
+        reply = render_discovery_reply(outcome)
+
+    elif action.action_type == "get_product_details":
+        # Answers "what sizes/colors do you have?" with real catalog data — resolved via the
+        # same reference logic as propose_add_to_cart, but strictly read-only (never proposes
+        # anything). Added specifically because the LLM was otherwise misusing search_products
+        # for this (rewriting the query using context instead of the shopper's own words).
+        raw_text = action.parameters.get("raw_text", message)
+        outcome = ctx.discovery_handler.resolve_product_details(raw_text, session.last_shown_product_ids)
+        _record_navigation(ctx.session_store, session, outcome)
+        log_action(session_id, action.action_type, "get_product_details", outcome.kind.value)
         reply = render_discovery_reply(outcome)
 
     elif action.action_type == "propose_add_to_cart" and ctx.cart_handler and ctx.pending_gate:

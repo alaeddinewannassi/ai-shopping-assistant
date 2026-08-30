@@ -62,6 +62,7 @@ class DiscoveryKind(str, Enum):
     CLARIFY = "clarify"
     NO_MATCH = "no_match"
     UNAVAILABLE = "unavailable"
+    PRODUCT_DETAILS = "product_details"
 
 
 @dataclass
@@ -209,6 +210,47 @@ class DiscoveryIntentHandler:
             kind=DiscoveryKind.PRODUCTS, products=_rehydrate(entry.products), degraded=True
         )
 
+    def resolve_product_details(
+        self, raw_text: str, last_shown_ids: list[str] | None = None
+    ) -> DiscoveryOutcome:
+        """The shopper is asking about a SPECIFIC, already-discussed product's real
+        attributes (sizes/colors/stock) — e.g. "what sizes do you have", "is it in stock".
+        Resolved via the same reference/keyword logic as
+        CartIntentHandler.resolve_add_to_cart (_resolve_single_product, defined in the User
+        Story 2 section below but shared across both), but strictly read-only: this never
+        proposes anything, it only reports real facts already in the catalog."""
+        try:
+            product, candidates = _resolve_single_product(self._adapter, raw_text, last_shown_ids)
+        except AdapterUnavailableError as exc:
+            _log_unavailable(f"product_details:{raw_text}", exc)
+            return DiscoveryOutcome(kind=DiscoveryKind.UNAVAILABLE)
+
+        if product is None and not candidates and last_shown_ids and len(last_shown_ids) == 1:
+            # A pure attribute question ("what sizes do you have") often has no keyword of
+            # its own that matches the product's name at all — "sizes"/"colors"/"stock" isn't
+            # part of any product name, so the keyword search above genuinely finds nothing.
+            # With exactly one product just shown, that's still almost certainly what this is
+            # about (the LLM is only meant to call this tool for an already-shown/named item).
+            try:
+                product = self._adapter.get_product(last_shown_ids[0])
+            except AdapterUnavailableError as exc:
+                _log_unavailable(f"product_details:fallback:{last_shown_ids[0]}", exc)
+                return DiscoveryOutcome(kind=DiscoveryKind.UNAVAILABLE)
+            except ProductNotFoundError:
+                pass
+
+        if product is None:
+            if candidates:
+                return DiscoveryOutcome(
+                    kind=DiscoveryKind.CLARIFY,
+                    clarifying_options=[
+                        Candidate(id=p.id, display_label=p.name) for p in candidates
+                    ],
+                )
+            return DiscoveryOutcome(kind=DiscoveryKind.NO_MATCH)
+
+        return DiscoveryOutcome(kind=DiscoveryKind.PRODUCT_DETAILS, products=[product])
+
 
 # --------------------------------------------------------------------------------------- #
 # User Story 2 - Add to Cart with Confirmation (T033)
@@ -268,6 +310,40 @@ def _resolve_reference_to_last_shown(raw_text: str, last_shown_ids: list[str]) -
     return None
 
 
+def _resolve_single_product(
+    adapter: CommerceAdapter, raw_text: str, last_shown_ids: list[str] | None
+) -> tuple[Optional[Product], list[Product]]:
+    """Resolves raw_text to exactly one product — shared by CartIntentHandler.resolve_add_to_cart
+    and DiscoveryIntentHandler.resolve_product_details, so "add it"/"the second one" and "what
+    sizes does it have" resolve identically. Tries a last-shown pronoun/ordinal reference first,
+    then a keyword search narrowed to require every meaningful token to match (naming an exact
+    full name shouldn't go ambiguous just because every candidate shares one common word).
+
+    Returns (product, ambiguous_candidates) — product is None when nothing matched (both empty)
+    or genuinely ambiguous (candidates populated, capped at 5). Does NOT catch
+    AdapterUnavailableError — that's each caller's own context to log distinctly."""
+    referenced_id = _resolve_reference_to_last_shown(raw_text, last_shown_ids or [])
+    if referenced_id is not None:
+        try:
+            return adapter.get_product(referenced_id), []
+        except ProductNotFoundError:
+            pass  # referenced product has since disappeared — fall through to keyword search
+
+    term = _clean_reference_term(raw_text)
+    products = adapter.search_products(query=term)
+    if not products:
+        return None, []
+    if len(products) > 1:
+        strict_tokens = [t for t in term.lower().split() if len(t) > 2]
+        if strict_tokens:
+            narrowed = [p for p in products if all(t in p.name.lower() for t in strict_tokens)]
+            if len(narrowed) == 1:
+                products = narrowed
+    if len(products) > 1:
+        return None, products[:5]
+    return products[0], []
+
+
 class CartResolutionKind(str, Enum):
     RESOLVED = "resolved"
     AMBIGUOUS_PRODUCT = "ambiguous_product"
@@ -309,49 +385,21 @@ class CartIntentHandler:
         one") resolve against that instead of falling through to a fresh keyword search that
         has no idea what "it" refers to."""
         quantity = _extract_quantity(raw_text)
-
-        referenced_id = _resolve_reference_to_last_shown(raw_text, last_shown_ids or [])
-        if referenced_id is not None:
-            try:
-                product = self._adapter.get_product(referenced_id)
-            except AdapterUnavailableError as exc:
-                _log_unavailable(f"add_to_cart:ref:{referenced_id}", exc)
-                return CartResolution(kind=CartResolutionKind.UNAVAILABLE)
-            except ProductNotFoundError:
-                product = None
-            if product is not None:
-                return self._resolve_variant_and_stock(product, raw_text, quantity)
-            # Referenced a product that's since disappeared (deleted/deactivated) — fall
-            # through to the ordinary keyword search below rather than dead-ending here.
-
-        term = _clean_reference_term(raw_text)
-
         try:
-            products = self._adapter.search_products(query=term)
+            product, candidates = _resolve_single_product(self._adapter, raw_text, last_shown_ids)
         except AdapterUnavailableError as exc:
-            _log_unavailable(f"add_to_cart:{term}", exc)
+            _log_unavailable(f"add_to_cart:{raw_text}", exc)
             return CartResolution(kind=CartResolutionKind.UNAVAILABLE)
 
-        if not products:
+        if product is None:
+            if candidates:
+                return CartResolution(
+                    kind=CartResolutionKind.AMBIGUOUS_PRODUCT,
+                    candidates=[p.name for p in candidates],
+                )
             return CartResolution(kind=CartResolutionKind.NOT_FOUND)
-        if len(products) > 1:
-            # search_products is deliberately permissive for open-ended discovery (ANY one
-            # token matching is enough) — but resolving what to actually ADD needs the
-            # opposite: a shopper naming one specific item (even an exact full name) shouldn't
-            # become "ambiguous" just because every candidate happens to share one common word
-            # ("hummingbird"). Narrow to products matching EVERY token before treating this as
-            # genuine ambiguity; if that doesn't land on exactly one, fall back to the full list.
-            strict_tokens = [t for t in term.lower().split() if len(t) > 2]
-            if strict_tokens:
-                narrowed = [p for p in products if all(t in p.name.lower() for t in strict_tokens)]
-                if len(narrowed) == 1:
-                    products = narrowed
-        if len(products) > 1:
-            return CartResolution(
-                kind=CartResolutionKind.AMBIGUOUS_PRODUCT, candidates=[p.name for p in products[:5]]
-            )
 
-        return self._resolve_variant_and_stock(products[0], raw_text, quantity)
+        return self._resolve_variant_and_stock(product, raw_text, quantity)
 
     def _resolve_variant_and_stock(
         self, product: Product, raw_text: str, quantity: int

@@ -139,6 +139,29 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "get_product_details",
+            "description": (
+                "The shopper is asking about a SPECIFIC product's real attributes — "
+                "available sizes/colors/variants, stock, or price — for an item you already "
+                "showed them or that they've named (e.g. \"what sizes do you have\", \"is it "
+                "in stock\", \"what colors does it come in\"). Use this INSTEAD OF "
+                "search_products when they're asking about details of something already "
+                "found, not searching for something new — search_products only matches "
+                "keywords against product names, it cannot answer a question about "
+                "attributes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "raw_text": {"type": "string", "description": "The shopper's message, verbatim."}
+                },
+                "required": ["raw_text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "propose_add_to_cart",
             "description": "The shopper wants to add an item to their cart.",
             "parameters": {
@@ -285,6 +308,11 @@ action exists, and only when the shopper is actually agreeing or declining it.
 - If the shopper wants to check out / place the order right now, use request_checkout.
 - If the shopper mentions a promo/coupon/discount code, or asks about discounts, use \
 apply_promo.
+- If the shopper is asking about a specific already-shown/named product's real attributes — \
+sizes, colors, variants, stock — use get_product_details, NOT search_products. \
+search_products only matches keywords against product names; it cannot answer a question \
+about an item's attributes, and rewriting a question like "what sizes do you have" into a \
+new search query will not work.
 - If the shopper names or clearly implies a specific product/category/search intent, classify \
 as a cart action (propose_add_to_cart / propose_update_cart / propose_remove_from_cart) or, \
 for browsing/searching/navigating, search_products or navigate_to.
