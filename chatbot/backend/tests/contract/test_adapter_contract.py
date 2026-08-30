@@ -44,6 +44,14 @@ def test_search_products_no_matches_returns_empty_list_not_raise(adapter: MockAd
     assert adapter.search_products(query="nonexistent-product-xyz") == []
 
 
+def test_search_products_matches_via_description_when_name_does_not(adapter: MockAdapter) -> None:
+    """"cotton" appears only in Classic T-Shirt's description, not its name — search should
+    still surface it, not just an exact product-name match."""
+    results = adapter.search_products(query="cotton")
+    assert len(results) == 1
+    assert results[0].name == "Classic T-Shirt"
+
+
 def test_search_products_filters_by_category(adapter: MockAdapter) -> None:
     results = adapter.search_products(filters={"category_id": "cat-jackets"})
     assert [p.name for p in results] == ["Blue Jacket"]

@@ -3,7 +3,7 @@ CommerceAdapter implementations' search and agent/intents.py's AND-narrowing."""
 
 from __future__ import annotations
 
-from src.adapters.matching import token_matches_name
+from src.adapters.matching import token_matches_name, token_matches_product
 
 
 def test_plural_query_matches_singular_name() -> None:
@@ -38,3 +38,19 @@ def test_short_token_never_matches() -> None:
 
 def test_unrelated_word_does_not_match() -> None:
     assert token_matches_name("jacket", "Hummingbird printed t-shirt") is False
+
+
+def test_token_matches_product_falls_back_to_description() -> None:
+    assert token_matches_product(
+        "cotton", "Hummingbird printed t-shirt", "Made of extra long staple pima cotton."
+    ) is True
+
+
+def test_token_matches_product_still_matches_name_with_no_description() -> None:
+    assert token_matches_product("sweater", "Hummingbird printed sweater", "") is True
+
+
+def test_token_matches_product_unrelated_word_matches_neither() -> None:
+    assert token_matches_product(
+        "waterproof", "Hummingbird printed t-shirt", "Made of extra long staple pima cotton."
+    ) is False

@@ -52,3 +52,15 @@ def token_matches_name(token: str, name: str) -> bool:
     `name` (a product name) — any overlap between their respective word-forms, never a loose
     substring check (see this module's docstring for why that was a real bug)."""
     return bool(_word_forms(token.lower()) & name_match_forms(name))
+
+
+def token_matches_product(token: str, name: str, description: str) -> bool:
+    """Like token_matches_name, but also matches against the product's real catalog
+    description — lets a search or attribute-ish query ("cotton", "waterproof") surface a
+    product whose NAME doesn't mention it but whose description does, e.g. "Hummingbird
+    printed t-shirt" made of "extra long staple pima cotton". Checked as a distinct fallback
+    (not folded into one combined blob) so a future caller can still tell which one matched."""
+    forms = _word_forms(token.lower())
+    if forms & name_match_forms(name):
+        return True
+    return bool(description) and bool(forms & name_match_forms(description))

@@ -15,6 +15,7 @@ from src.adapters.prestashop import (
     _as_int,
     _localized,
     _split_variant_id,
+    _strip_html,
 )
 
 _as_list = PrestaShopAdapter._as_list
@@ -39,6 +40,17 @@ def test_localized_tolerates_flat_string() -> None:
 def test_localized_unwraps_language_wrapper_dict() -> None:
     value = {"language": [{"id": "1", "value": "Blue Jacket"}]}
     assert _localized(value, 1) == "Blue Jacket"
+
+
+def test_strip_html_removes_tags_and_collapses_whitespace() -> None:
+    assert (
+        _strip_html("<p>Regular fit,   <b>short</b>\n sleeves. Made of pima cotton.</p>")
+        == "Regular fit, short sleeves. Made of pima cotton."
+    )
+
+
+def test_strip_html_tolerates_plain_text_with_no_tags() -> None:
+    assert _strip_html("Made of pima cotton.") == "Made of pima cotton."
 
 
 def test_as_list_normalizes_single_result_to_list() -> None:

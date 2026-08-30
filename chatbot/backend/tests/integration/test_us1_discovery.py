@@ -175,6 +175,33 @@ class _LyingScriptedLLMClient(_ScriptedLLMClient):
         return "Got it — here's the exact item you asked about."
 
 
+class _RenamingScriptedLLMClient(_ScriptedLLMClient):
+    """A real, confirmed live failure mode (not hypothetical): asked to rephrase a
+    single-product search result, a real LLM substituted a descriptive paraphrase for the
+    catalog's actual product name ("Classic T-Shirt" became "a round-neck tee") — a subtle
+    violation of _PHRASE_SYSTEM_PROMPT's explicit "never change a product name" rule. Proves
+    dialogue.py verifies phrase_reply's output still contains the real product name,
+    discarding it (falling back to the exact template) rather than trusting the prompt
+    alone."""
+
+    def phrase_reply(self, facts: str, shopper_message: str, *, session_id: str | None = None) -> str:
+        return "I found a great round-neck tee for you, only $19.99!"
+
+
+def test_phrase_reply_that_renames_the_product_is_discarded(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    scripted = _RenamingScriptedLLMClient(
+        ActionCall(action_type="search_products", parameters={"query": "classic t-shirt"})
+    )
+    ctx = _ctx(adapter, scripted, session_store)
+
+    reply = handle_turn(ctx, "s18", "classic t-shirt")
+
+    assert "Classic T-Shirt" in reply
+    assert "round-neck" not in reply.lower()
+
+
 def test_ask_or_chat_returns_the_llms_text_directly(
     adapter: MockAdapter, session_store: SessionStore
 ) -> None:
@@ -234,6 +261,29 @@ def test_get_product_details_reports_real_variant_data_for_the_last_shown_produc
     assert "size: M" in reply
     assert "size: L" in reply
     assert "out of stock" in reply  # the L variant is out of stock — a real, not guessed, fact
+
+
+def test_get_product_details_reply_includes_the_real_catalog_description(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    """Regression test for a real gap reported from live testing: "is it cotton?" got a
+    generic "I couldn't find anything matching that" instead of an answer, because the
+    catalog description phrase_reply would need to answer from wasn't even fetched or
+    included anywhere in get_product_details' reply. It doesn't need to be phrased into a
+    yes/no here (that's phrase_reply's job, exercised against a real LLM only) — just
+    present as real, verifiable ground truth in the deterministic reply."""
+    session = session_store.get_or_create("s12b")
+    session.last_shown_product_ids = ["prod-tshirt-1"]
+    session_store.save(session)
+
+    scripted = _ScriptedLLMClient(
+        ActionCall(action_type="get_product_details", parameters={"raw_text": "is it cotton"})
+    )
+    ctx = _ctx(adapter, scripted, session_store)
+
+    reply = handle_turn(ctx, "s12b", "is it cotton")
+
+    assert "cotton" in reply.lower()
 
 
 def test_get_product_details_never_fabricates_an_answer_with_nothing_to_back_it(

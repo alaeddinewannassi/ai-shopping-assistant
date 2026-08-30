@@ -25,6 +25,7 @@ checkout shortcut at the webservice layer.
 from __future__ import annotations
 
 import os
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -45,7 +46,7 @@ from src.adapters.base import (
     PromoValidation,
     Variant,
 )
-from src.adapters.matching import token_matches_name
+from src.adapters.matching import token_matches_product
 from src.adapters.resilience import CircuitBreaker, CircuitBreakerConfig, default_is_transport_error
 
 _NO_COMBINATION_ATTR_ID = 0  # PrestaShop convention: id_product_attribute=0 means "the product itself"
@@ -76,6 +77,17 @@ def _localized(value: Any, lang_id: int) -> str:
         if value:
             return value[0].get("value", "") or ""
     return ""
+
+
+_HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
+
+
+def _strip_html(value: str) -> str:
+    """PrestaShop's description/description_short fields are rich-text HTML (`<p>...</p>`,
+    etc.) — stripped down to plain text since this only ever reaches phrase_reply's ground
+    truth or a search/match token pass, never rendered as markup."""
+    text = _HTML_TAG_PATTERN.sub(" ", value)
+    return " ".join(text.split())
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -265,14 +277,16 @@ class PrestaShopAdapter:
         if query:
             tokens = [t for t in query.lower().split() if len(t) > 2]
             if tokens:
-                # token_matches_name (shared with MockAdapter, adapters/matching.py) handles
-                # simple singular/plural and hyphenated-compound mismatches ("posters" vs.
-                # "poster", "tshirt" vs. "t-shirt") via equality after folding — never a
-                # loose substring check, which let short unrelated words falsely match
-                # (e.g. "not" ⊂ "notebook").
+                # token_matches_product (shared with MockAdapter, adapters/matching.py)
+                # handles simple singular/plural and hyphenated-compound mismatches
+                # ("posters" vs. "poster", "tshirt" vs. "t-shirt") via equality after folding
+                # — never a loose substring check, which let short unrelated words falsely
+                # match (e.g. "not" ⊂ "notebook") — and also matches the product's real
+                # description, so "cotton"/"waterproof" surfaces items whose NAME alone
+                # doesn't say so.
                 products = [
                     p for p in products
-                    if any(token_matches_name(t, p.name) for t in tokens)
+                    if any(token_matches_product(t, p.name, p.description) for t in tokens)
                 ]
 
         color = filters.get("color")
@@ -288,7 +302,9 @@ class PrestaShopAdapter:
         return products
 
     def get_product(self, product_id: str) -> Product:
-        data = self._get(f"/api/products/{_as_int(product_id)}")
+        # display=full — PrestaShop's default field set omits description/description_short
+        # (large, optional text), same as search_products' own listing fetch above.
+        data = self._get(f"/api/products/{_as_int(product_id)}", {"display": "full"})
         if data is None:
             raise ProductNotFoundError(f"No such product: {product_id}")
         raw = data.get("product", data)
@@ -671,12 +687,20 @@ class PrestaShopAdapter:
 
     def _map_product(self, raw: dict) -> Product:
         product_id = _as_int(raw.get("id"))
+        # description_short is the store's own front-end blurb (e.g. what's shown right
+        # under the price on the product page) — prefer it, falling back to the full
+        # description when a product has no short one, over showing nothing at all.
+        description = _strip_html(
+            _localized(raw.get("description_short"), self._lang_id)
+            or _localized(raw.get("description"), self._lang_id)
+        )
         return Product(
             id=str(product_id),
             name=_localized(raw.get("name"), self._lang_id),
             category_id=str(raw.get("id_category_default", "")),
             base_price=_as_float(raw.get("price")),
             variants=self._load_variants(product_id, _as_float(raw.get("price"))),
+            description=description,
         )
 
     def _load_variants(self, product_id: int, base_price: float) -> list[Variant]:

@@ -25,7 +25,7 @@ from src.adapters.base import (
     PromoValidation,
     Variant,
 )
-from src.adapters.matching import token_matches_name
+from src.adapters.matching import token_matches_product
 
 
 @dataclass
@@ -80,6 +80,7 @@ class MockAdapter:
             name="Classic T-Shirt",
             category_id=tshirts.id,
             base_price=19.99,
+            description="A soft, breathable crew neck tee made of 100% organic cotton.",
             variants=[
                 Variant(
                     id="var-tshirt-1-red-m",
@@ -102,6 +103,7 @@ class MockAdapter:
             name="Blue Jacket",
             category_id=jackets.id,
             base_price=89.99,
+            description="A water-resistant polyester shell jacket built for cold weather.",
             variants=[
                 Variant(
                     id="var-jacket-1-blue-m",
@@ -153,7 +155,7 @@ class MockAdapter:
             if query_tokens:
                 results = [
                     p for p in results
-                    if any(token_matches_name(t, p.name) for t in query_tokens)
+                    if any(token_matches_product(t, p.name, p.description) for t in query_tokens)
                 ]
             else:
                 # Query was entirely stopwords/too short to extract keywords from — treat

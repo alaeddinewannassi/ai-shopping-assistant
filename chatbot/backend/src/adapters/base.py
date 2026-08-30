@@ -35,6 +35,11 @@ class Product:
     category_id: str
     base_price: float
     variants: list[Variant] = field(default_factory=list)
+    # Plain-text catalog description (HTML stripped by the adapter) — lets search match a
+    # descriptive word the product NAME doesn't carry ("cotton", "waterproof"), and lets
+    # get_product_details answer a real attribute question phrase_reply otherwise has no
+    # grounded facts to draw from. Empty when the store has none for this product.
+    description: str = ""
 
 
 @dataclass

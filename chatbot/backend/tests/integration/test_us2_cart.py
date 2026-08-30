@@ -13,7 +13,7 @@ import pytest
 from src.adapters.mock import MockAdapter
 from src.agent.dialogue import DialogueContext, handle_turn
 from src.agent.intents import CartIntentHandler, CartResolutionKind, DiscoveryIntentHandler
-from src.agent.llm_client import RuleBasedStubClient
+from src.agent.llm_client import ActionCall, RuleBasedStubClient
 from src.agent.pending import PendingActionGate
 from src.agent.taxonomy_resolver import TaxonomyResolver
 from src.session.catalog_cache import CatalogSnapshotCache
@@ -495,3 +495,72 @@ def test_bare_quantity_with_no_pending_add_falls_through_to_normal_routing(
 
     assert "x Classic T-Shirt" not in reply
     assert "x Blue Jacket" not in reply
+
+
+# -- Bare confirmation/reference after a single shown product -> deterministic propose ----- #
+
+
+class _AlwaysSearchLLMClient(RuleBasedStubClient):
+    """A real, confirmed live failure mode (not hypothetical): a hosted LLM was seen
+    inconsistently classifying exactly these bare confirmation/reference messages
+    ("yes", "add it", "the first one") as search_products instead of propose_add_to_cart —
+    a query with none of them as real search terms then finds nothing at all. This client
+    always misroutes to search_products regardless of input, proving the deterministic
+    override in dialogue.py (_bare_confirmation_add_override) bypasses the LLM entirely for
+    the cases it covers — it is never even asked to classify them."""
+
+    def parse_turn(self, message: str, context: dict, *, session_id: str | None = None) -> ActionCall:
+        return ActionCall(action_type="search_products", parameters={"query": message})
+
+
+def test_bare_yes_with_single_shown_product_and_nothing_pending_proposes_it(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    ctx = _ctx(adapter, _AlwaysSearchLLMClient(), session_store)
+    handle_turn(ctx, "u22", "show me jackets")
+
+    reply = handle_turn(ctx, "u22", "yes")
+
+    assert "couldn't find anything matching" not in reply.lower()
+    assert "Blue Jacket" in reply
+    # Blue Jacket has two variants (size M/L) and "yes" alone doesn't say which — routed
+    # correctly to propose_add_to_cart either way, so this legitimately asks to disambiguate
+    # rather than skipping straight to a confirm prompt.
+    assert "which option" in reply.lower() or "confirm" in reply.lower()
+
+
+def test_bare_add_it_with_single_shown_product_and_nothing_pending_proposes_it(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    ctx = _ctx(adapter, _AlwaysSearchLLMClient(), session_store)
+    handle_turn(ctx, "u23", "show me jackets")
+
+    reply = handle_turn(ctx, "u23", "add it")
+
+    assert "couldn't find anything matching" not in reply.lower()
+    assert "Blue Jacket" in reply
+
+
+def test_the_first_one_with_multiple_shown_products_and_nothing_pending_proposes_it(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    ctx = _ctx(adapter, _AlwaysSearchLLMClient(), session_store)
+    handle_turn(ctx, "u24", "show me everything")  # both catalog products shown
+
+    reply = handle_turn(ctx, "u24", "the first one")
+
+    assert "couldn't find anything matching" not in reply.lower()
+
+
+def test_bare_yes_with_a_pending_action_is_not_overridden(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    """A real pending confirmation must always win — the override only fires with nothing
+    already awaiting a yes/no, never second-guessing an actual confirm."""
+    ctx = _ctx(adapter, llm_client, session_store)
+    handle_turn(ctx, "u25", "add the red classic t-shirt to my cart")
+
+    reply = handle_turn(ctx, "u25", "yes")
+
+    cart = adapter.get_cart("u25")
+    assert len(cart.lines) == 1  # confirmed normally, not re-proposed

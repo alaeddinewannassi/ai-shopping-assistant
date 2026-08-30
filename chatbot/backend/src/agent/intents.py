@@ -25,7 +25,7 @@ from src.adapters.base import (
     PromoValidation,
     Variant,
 )
-from src.adapters.matching import token_matches_name
+from src.adapters.matching import token_matches_product
 from src.agent.taxonomy_resolver import Candidate, ResolutionStatus, TaxonomyResolver
 from src.session.catalog_cache import CatalogSnapshotCache
 
@@ -362,16 +362,19 @@ def _resolve_single_product(
         positive_tokens = [t for t in positive_part.split() if len(t) > 2]
         negative_tokens = [t for t in negative_part.split() if len(t) > 2]
         if positive_tokens or negative_tokens:
-            # token_matches_name — the SAME matching the initial broad search above already
-            # used — not a naive substring check: "tshirt" (no hyphen) legitimately matches
-            # a catalog name spelled "t-shirt", but a naive `"tshirt" in name.lower()` check
-            # missed that (the hyphen makes them different strings), so this narrowing step
-            # failed to narrow even when the broad search above had already found the exact
-            # right product — leaving it stuck "ambiguous" against unrelated candidates.
+            # token_matches_product — the SAME matching the initial broad search above
+            # already used (name AND description) — not a naive substring check: "tshirt"
+            # (no hyphen) legitimately matches a catalog name spelled "t-shirt", but a naive
+            # `"tshirt" in name.lower()` check missed that (the hyphen makes them different
+            # strings), so this narrowing step failed to narrow even when the broad search
+            # above had already found the exact right product — leaving it stuck "ambiguous"
+            # against unrelated candidates. Must also check description here, not just name:
+            # a product the broad search above matched via its description would otherwise
+            # get wrongly excluded by a stricter, name-only narrowing step.
             narrowed = [
                 p for p in products
-                if all(token_matches_name(t, p.name) for t in positive_tokens)
-                and not any(token_matches_name(t, p.name) for t in negative_tokens)
+                if all(token_matches_product(t, p.name, p.description) for t in positive_tokens)
+                and not any(token_matches_product(t, p.name, p.description) for t in negative_tokens)
             ]
             if len(narrowed) == 1:
                 products = narrowed

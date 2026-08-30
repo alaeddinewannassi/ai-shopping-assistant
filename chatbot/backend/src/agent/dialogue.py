@@ -21,6 +21,7 @@ from src.adapters.base import (
     ProductNotFoundError,
 )
 from src.agent.intents import (
+    _ORDINAL_PATTERN,
     CartIntentHandler,
     CartResolutionKind,
     DiscoveryIntentHandler,
@@ -119,14 +120,21 @@ def render_discovery_reply(outcome: DiscoveryOutcome) -> str:
     if outcome.kind == DiscoveryKind.PRODUCT_DETAILS:
         assert outcome.products
         product = outcome.products[0]
+        # Included as real ground truth — not just for direct display, but so phrase_reply
+        # (agent/llm_client.py's _PHRASE_SYSTEM_PROMPT) has an actual fact to draw from when
+        # asked something the size/color/stock listing alone can't answer, e.g. "is it
+        # cotton?". Without this, phrase_reply correctly refuses to answer at all (it may
+        # never add a fact beyond what it's given) rather than fabricating a material it was
+        # never told.
+        description_suffix = f" {product.description}" if product.description else ""
         if not product.variants:
-            return f"{product.name} is ${product.base_price:.2f} — it doesn't have size/color options."
+            return f"{product.name} is ${product.base_price:.2f} — it doesn't have size/color options.{description_suffix}"
         options = []
         for variant in product.variants:
             attrs = ", ".join(f"{k}: {v}" for k, v in variant.attributes.items())
             status = "in stock" if variant.in_stock else "out of stock"
             options.append(f"{attrs} ({status})")
-        return f"{product.name} (${product.base_price:.2f}) comes in: {'; '.join(options)}."
+        return f"{product.name} (${product.base_price:.2f}) comes in: {'; '.join(options)}.{description_suffix}"
 
     return "I'm not sure how to help with that yet."  # pragma: no cover - exhaustive enum
 
@@ -231,6 +239,38 @@ def _handle_pending_add_quantity_override(ctx: DialogueContext, session_id: str,
         details={"action_id": action.action_id, "quantity_override": quantity},
     )
     return f"{recap} (reply 'yes' to confirm or 'no' to cancel)"
+
+
+# Bare confirmation/reference words a shopper uses to mean "yes, that one — add it" right
+# after being shown or offered a single product, with nothing yet pending to confirm. Real
+# live testing showed a hosted LLM inconsistently routing exactly these ("yes", "add it",
+# "the first one") to search_products instead of propose_add_to_cart — a query with none of
+# these as real search terms then finds nothing ("I couldn't find anything matching that"),
+# even though the shopper's intent was completely unambiguous. Resolved deterministically
+# instead, the same posture as _pending_add_quantity_override above: the LLM isn't even
+# asked to classify a turn this fires on, so its classification reliability stops mattering
+# for exactly the cases with the least room for it to be wrong.
+_BARE_ADD_CONFIRMATION_WORDS = {
+    "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "alright", "add it", "buy it",
+    "get it", "take it", "ill take it", "i will take it",
+}
+
+
+def _bare_confirmation_add_override(session: ConversationSession, message: str) -> bool:
+    """True when this turn should be routed straight to propose_add_to_cart without asking
+    the LLM: no pending action already awaits a yes/no (that must always win — never
+    second-guess a real confirm/decline), something was actually shown/offered to reference,
+    and the message itself is either an exact bare confirmation word/phrase or names an
+    ordinal ("the first one") — never a longer, more specific message that might carry its
+    own distinct intent the LLM genuinely needs to parse."""
+    if session.pending_action is not None:
+        return False
+    if not session.pending_variant_product_id and not session.last_shown_product_ids:
+        return False
+    cleaned = re.sub(r"[^\w\s'-]", "", message.lower()).strip()
+    if cleaned in _BARE_ADD_CONFIRMATION_WORDS:
+        return True
+    return bool(session.last_shown_product_ids) and bool(_ORDINAL_PATTERN.search(cleaned))
 
 
 def _handle_propose_add_to_cart(
@@ -727,6 +767,9 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         # Deterministic fast path — see _pending_add_quantity_override's docstring. The LLM
         # is never even asked to classify this turn: there's nothing for it to judge.
         action = ActionCall(action_type="propose_add_to_cart", parameters={"raw_text": message})
+    elif ctx.cart_handler and ctx.pending_gate and _bare_confirmation_add_override(session, message):
+        # Deterministic fast path — see _bare_confirmation_add_override's docstring.
+        action = ActionCall(action_type="propose_add_to_cart", parameters={"raw_text": message})
     else:
         action = ctx.llm_client.parse_turn(
             message, context=_build_llm_context(session), session_id=session_id
@@ -752,6 +795,13 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
     # hallucination, just one step earlier. Only a genuinely resolved/positive outcome may
     # be phrased; CLARIFY/NO_MATCH/UNAVAILABLE always stay exact templates.
     discovery_outcome_kind: DiscoveryKind | None = None
+    # The real product name(s) this turn's reply is actually about, whenever there are any —
+    # phrase_reply below may only rephrase wording/tone, never the product's own name (a real
+    # LLM was seen live substituting a descriptive paraphrase, "round-neck tee", for the
+    # actual catalog name, "Classic T-Shirt" — a subtle but real violation of
+    # _PHRASE_SYSTEM_PROMPT's explicit "never change a product name" rule). Verified, not
+    # just prompted against, below.
+    discovery_product_names: list[str] = []
 
     if action.action_type == "search_products":
         query = action.parameters.get("query", message)
@@ -760,6 +810,7 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         log_action(session_id, action.action_type, "search_products", outcome.kind.value, details={"query": query})
         reply = render_discovery_reply(outcome)
         discovery_outcome_kind = outcome.kind
+        discovery_product_names = [p.name for p in outcome.products]
         if outcome.kind == DiscoveryKind.PRODUCTS:
             # Mutually exclusive with auto-navigate, not additive: a link to a page we're
             # about to redirect to (or already on) is redundant — only show links for the
@@ -776,6 +827,7 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         log_action(session_id, action.action_type, "navigate_to", outcome.kind.value, details={"target": target})
         reply = render_discovery_reply(outcome)
         discovery_outcome_kind = outcome.kind
+        discovery_product_names = [p.name for p in outcome.products]
         if outcome.kind == DiscoveryKind.NAVIGATE_CATEGORY:
             if len(outcome.products) == 1:
                 auto_navigate_product_id = outcome.products[0].id
@@ -793,6 +845,7 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         log_action(session_id, action.action_type, "get_product_details", outcome.kind.value)
         reply = render_discovery_reply(outcome)
         discovery_outcome_kind = outcome.kind
+        discovery_product_names = [p.name for p in outcome.products]
         if outcome.kind == DiscoveryKind.PRODUCT_DETAILS:
             # Always exactly one product by construction — always auto-navigate, never a
             # redundant link to the page we're about to redirect to (or already on).
@@ -916,5 +969,13 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
     # results / product details) — phrase_reply may only rephrase it naturally, never
     # add/remove/change a fact (llm_client.py's _PHRASE_SYSTEM_PROMPT). RuleBasedStubClient
     # passes it through unchanged, so every existing exact-string test keeps working untouched.
-    return ctx.llm_client.phrase_reply(final_reply, message, session_id=session_id)
+    phrased = ctx.llm_client.phrase_reply(final_reply, message, session_id=session_id)
+    # Verified, not just prompted against (see discovery_product_names' own comment above):
+    # if the phrased reply drops or alters even one real product name from the ground truth
+    # it was given, discard it and fall back to the exact template rather than let a
+    # paraphrased/renamed product reach the shopper.
+    if any(name not in phrased for name in discovery_product_names):
+        log_action(session_id, action.action_type, "phrase_reply", "discarded_name_mismatch")
+        return final_reply
+    return phrased
 
