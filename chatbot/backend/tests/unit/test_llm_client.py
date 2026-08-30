@@ -240,3 +240,18 @@ def test_groq_client_context_includes_pending_action_for_the_model() -> None:
     )
     assert action.action_type == "confirm_pending_action"
     assert "Red T-Shirt" in seen_content["user_message"]
+
+
+def test_groq_client_returns_ask_or_chat_for_a_greeting() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert {t["function"]["name"] for t in body["tools"]} >= {"ask_or_chat"}
+        return _groq_response(
+            name="ask_or_chat",
+            arguments={"text": "Hi there! What are you shopping for today?"},
+        )
+
+    client = FreeTierHostedLLMClient(api_key="fake-key", client=_mock_client(handler))
+    action = client.parse_turn("hello", {})
+    assert action.action_type == "ask_or_chat"
+    assert action.parameters == {"text": "Hi there! What are you shopping for today?"}

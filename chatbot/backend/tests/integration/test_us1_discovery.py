@@ -11,7 +11,7 @@ from src.adapters.base import AttributeGroup, Category
 from src.adapters.mock import MockAdapter
 from src.agent.dialogue import DialogueContext, handle_turn
 from src.agent.intents import DiscoveryIntentHandler
-from src.agent.llm_client import RuleBasedStubClient
+from src.agent.llm_client import ActionCall, RuleBasedStubClient
 from src.agent.taxonomy_resolver import TaxonomyResolver
 from src.session.catalog_cache import CatalogSnapshotCache
 from src.session.store import SessionStore
@@ -144,3 +144,42 @@ def test_backend_unreachable_with_nothing_cached_gives_plain_unavailable_message
 
     assert "can't reach" in reply.lower() or "can't search" in reply.lower()
     assert "Jacket" not in reply and "T-Shirt" not in reply  # never fabricate product data
+
+
+# -- ask_or_chat: the conversational fallback for greetings/small talk -------- #
+
+
+class _ScriptedLLMClient:
+    """A minimal LLMClient stub (duck-typed against the Protocol) that always returns one
+    fixed ActionCall — RuleBasedStubClient has no ask_or_chat branch (by design, see its own
+    docstring), so dialogue.py's routing for it needs a client that can actually produce one."""
+
+    def __init__(self, action: ActionCall) -> None:
+        self._action = action
+
+    def parse_turn(self, message: str, context: dict, *, session_id: str | None = None) -> ActionCall:
+        return self._action
+
+
+def test_ask_or_chat_returns_the_llms_text_directly(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    scripted = _ScriptedLLMClient(
+        ActionCall(action_type="ask_or_chat", parameters={"text": "Hi! What are you shopping for today?"})
+    )
+    ctx = _ctx(adapter, scripted, session_store)
+
+    reply = handle_turn(ctx, "s8", "hello")
+
+    assert reply == "Hi! What are you shopping for today?"
+
+
+def test_ask_or_chat_falls_back_to_a_default_when_text_is_missing(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    scripted = _ScriptedLLMClient(ActionCall(action_type="ask_or_chat", parameters={}))
+    ctx = _ctx(adapter, scripted, session_store)
+
+    reply = handle_turn(ctx, "s9", "hello")
+
+    assert reply == "How can I help you find something today?"

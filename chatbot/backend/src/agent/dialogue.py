@@ -586,6 +586,14 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
     elif action.action_type == "decline_pending_action" and ctx.pending_gate:
         reply = _handle_decline(ctx, session_id)
 
+    elif action.action_type == "ask_or_chat":
+        # The one place the LLM's own words reach the shopper directly — everything else
+        # in this file renders from deterministic outcomes. The system prompt (llm_client.py)
+        # forbids stating catalog facts or answering off-topic questions here; this is purely
+        # a conversational fallback for greetings/small talk/vague or exploratory messages.
+        reply = action.parameters.get("text") or "How can I help you find something today?"
+        log_action(session_id, action.action_type, "ask_or_chat", "ok")
+
     else:
         reply = (
             f"(Recognized intent: {action.action_type} — full handling for this intent is "
