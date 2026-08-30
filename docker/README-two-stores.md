@@ -53,7 +53,9 @@ respectively, per `docker-compose.yml`'s defaults):
 
 1. **Advanced Parameters → Webservice** → turn it on, add a key with GET/PUT/POST/DELETE on
    `products`, `categories`, `combinations`, `product_options`, `product_option_values`,
-   `stock_availables`, `carts`, `cart_rules`, `orders`. Copy the key.
+   `stock_availables`, `carts`, `cart_rules`, `orders`, `specific_prices` (this last one is
+   how a validated promo actually gets applied to a cart — miss it and `apply_promo` 403s
+   even though `validate_promo` works fine). Copy the key.
 2. **Customers → Add new** → create one, then add an address for them. Note both ids.
 3. **Shipping → Carriers** → note an enabled carrier's id (the stock install ships one).
 4. Optional, for the promo-suggestion feature: **Catalog → Discounts → Cart Rules**, create

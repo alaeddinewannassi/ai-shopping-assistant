@@ -18,7 +18,9 @@ Admin → **Advanced Parameters → Webservice**:
 1. Turn Webservice **on**.
 2. **Add a new webservice key.** Grant it GET/PUT/POST/DELETE on: `products`, `categories`,
    `combinations`, `product_options`, `product_option_values`, `stock_availables`, `carts`,
-   `cart_rules`, `orders`.
+   `cart_rules`, `orders`, `specific_prices` (the last one is easy to miss — it's how a
+   validated promo code's discount actually gets applied to a cart; without it,
+   `validate_promo` succeeds but `apply_promo` fails with a 403).
 3. Copy the generated key into `backend/.env` as `PRESTASHOP_API_KEY`.
 
 ## 2. Confirm/adjust the demo catalog
