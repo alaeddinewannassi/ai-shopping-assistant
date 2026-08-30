@@ -6,6 +6,8 @@ prestashop.py's module docstring in isolation, independent of a live PrestaShop 
 
 from __future__ import annotations
 
+import httpx
+
 from src.adapters.prestashop import (
     PrestaShopAdapter,
     _as_bool,
@@ -88,3 +90,62 @@ def test_missing_env_raises_value_error(monkeypatch) -> None:
         assert "PRESTASHOP_BASE_URL" in str(exc)
     else:
         raise AssertionError("expected ValueError when PrestaShop env vars are unset")
+
+
+# -- Real-shopper identity resolution (set_customer_context) -------------------------- #
+
+
+def _adapter_with_mock_transport(handler) -> PrestaShopAdapter:
+    adapter = PrestaShopAdapter(
+        base_url="http://prestashop.test/api",
+        api_key="fake-key",
+        default_customer_id="1",
+        default_address_id="1",
+    )
+    adapter._client = httpx.Client(transport=httpx.MockTransport(handler))
+    return adapter
+
+
+def test_resolve_checkout_identity_falls_back_to_demo_defaults_with_no_customer_context() -> None:
+    adapter = _adapter_with_mock_transport(lambda r: httpx.Response(200, json={}))
+    assert adapter._resolve_checkout_identity("cart-1") == ("1", "1")
+
+
+def test_resolve_checkout_identity_uses_the_real_customer_and_their_address() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/api/customers" in request.url.path:
+            return httpx.Response(200, json={"customers": [{"id": "42"}]})
+        if "/api/addresses" in request.url.path:
+            return httpx.Response(200, json={"addresses": [{"id": "7"}]})
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    adapter = _adapter_with_mock_transport(handler)
+    adapter.set_customer_context("cart-1", "shopper@example.com")
+    assert adapter._resolve_checkout_identity("cart-1") == ("42", "7")
+
+
+def test_resolve_checkout_identity_falls_back_when_email_is_unknown() -> None:
+    adapter = _adapter_with_mock_transport(lambda r: httpx.Response(200, json={"customers": []}))
+    adapter.set_customer_context("cart-1", "nobody@example.com")
+    assert adapter._resolve_checkout_identity("cart-1") == ("1", "1")
+
+
+def test_resolve_checkout_identity_falls_back_when_customer_has_no_saved_address() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/api/customers" in request.url.path:
+            return httpx.Response(200, json={"customers": [{"id": "42"}]})
+        return httpx.Response(200, json={"addresses": []})
+
+    adapter = _adapter_with_mock_transport(handler)
+    adapter.set_customer_context("cart-1", "shopper@example.com")
+    assert adapter._resolve_checkout_identity("cart-1") == ("1", "1")
+
+
+def test_set_customer_context_none_clears_a_previous_override() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("should never call out — no override is set")
+
+    adapter = _adapter_with_mock_transport(handler)
+    adapter._cart_customer_overrides["cart-1"] = "shopper@example.com"
+    adapter.set_customer_context("cart-1", None)
+    assert adapter._resolve_checkout_identity("cart-1") == ("1", "1")

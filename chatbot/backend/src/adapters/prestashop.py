@@ -175,7 +175,14 @@ class PrestaShopAdapter:
         # Maps the assistant's opaque session/cart_id string onto a real PrestaShop id_cart,
         # created lazily on first use (mirrors MockAdapter keying carts by that same string).
         self._cart_id_map: dict[str, int] = {}
-        self._customer_secure_key_cache: str | None = None
+        self._customer_secure_key_cache: dict[str, str] = {}
+        # cart_id -> the real, logged-in shopper's email (set_customer_context) — when
+        # present, cart/order creation attributes to THIS shopper's own PrestaShop account
+        # (their own address, their own order history) instead of the tenant's one shared
+        # demo identity above. See set_customer_context's docstring for the trust model.
+        self._cart_customer_overrides: dict[str, str] = {}
+        self._customer_id_by_email_cache: dict[str, str | None] = {}
+        self._address_id_by_customer_cache: dict[str, str | None] = {}
         # PrestaShop's webservice has no association to attach a cart_rule to a cart or
         # order (the `cart`/`order` resource schemas only expose *_rows, never cart_rules —
         # confirmed via GET .../carts?schema=synopsis), so an applied promo code's *name*
@@ -457,7 +464,8 @@ class PrestaShopAdapter:
                 break
 
     def checkout(self, cart_id: str) -> Order:
-        if not (self._customer_id and self._address_id and self._carrier_id):
+        customer_id, address_id = self._resolve_checkout_identity(cart_id)
+        if not (customer_id and address_id and self._carrier_id):
             raise AdapterUnavailableError(
                 "Checkout is not configured: PRESTASHOP_DEFAULT_CUSTOMER_ID/"
                 "_ADDRESS_ID/_CARRIER_ID must be set (backend/.env.example) — PrestaShop's "
@@ -481,9 +489,9 @@ class PrestaShopAdapter:
         total = cart.grand_total
         fields = {
             "id_cart": id_cart,
-            "id_customer": self._customer_id,
-            "id_address_delivery": self._address_id,
-            "id_address_invoice": self._address_id,
+            "id_customer": customer_id,
+            "id_address_delivery": address_id,
+            "id_address_invoice": address_id,
             "id_carrier": self._carrier_id,
             "id_currency": self._currency_id,
             "id_lang": self._lang_id,
@@ -492,7 +500,7 @@ class PrestaShopAdapter:
             # PrestaShop's order validation rejects any order whose secure_key doesn't
             # match the owning customer's (Validate::isLoadedObject / OrderCore checks) —
             # there is no way to omit or fake this at the webservice layer.
-            "secure_key": self._customer_secure_key(),
+            "secure_key": self._customer_secure_key(customer_id),
             "module": self._payment_module,
             "payment": self._payment_label,
             "total_paid": total,
@@ -526,17 +534,19 @@ class PrestaShopAdapter:
     def _get_or_create_ps_cart(self, cart_id: str) -> int:
         id_cart = self._cart_id_map.get(cart_id)
         if id_cart is None:
-            id_cart = self._create_cart()
+            customer_id, _ = self._resolve_checkout_identity(cart_id)
+            id_cart = self._create_cart(customer_id)
             self._cart_id_map[cart_id] = id_cart
         return id_cart
 
-    def _create_cart(self) -> int:
+    def _create_cart(self, customer_id: str | None) -> int:
         fields = {"id_lang": self._lang_id, "id_currency": self._currency_id, "id_shop": 1}
-        # Attaching the configured default customer up front (rather than only at checkout)
-        # keeps the cart's id_customer consistent with the order placed against it later —
-        # PrestaShop's order validation checks the two agree.
-        if self._customer_id:
-            fields["id_customer"] = self._customer_id
+        # Attaching the customer up front (rather than only at checkout) keeps the cart's
+        # id_customer consistent with the order placed against it later — PrestaShop's order
+        # validation checks the two agree. `customer_id` is the real logged-in shopper's id
+        # when set_customer_context resolved one, else the tenant's shared demo customer.
+        if customer_id:
+            fields["id_customer"] = customer_id
         xml_body = self._build_xml("cart", fields)
         resp = self._xml_request("POST", "/api/carts", xml_body)
         if resp.status_code >= 400:
@@ -545,12 +555,62 @@ class PrestaShopAdapter:
         raw = data.get("cart", data)
         return _as_int(raw.get("id"))
 
-    def _customer_secure_key(self) -> str:
-        if self._customer_secure_key_cache is None:
-            data = self._get(f"/api/customers/{self._customer_id}")
+    def _customer_secure_key(self, customer_id: str) -> str:
+        if customer_id not in self._customer_secure_key_cache:
+            data = self._get(f"/api/customers/{customer_id}")
             raw = (data or {}).get("customer", data or {})
-            self._customer_secure_key_cache = raw.get("secure_key", "")
-        return self._customer_secure_key_cache
+            self._customer_secure_key_cache[customer_id] = raw.get("secure_key", "")
+        return self._customer_secure_key_cache[customer_id]
+
+    # -- Real shopper identity (optional; falls back to the tenant's demo identity) ------- #
+
+    def set_customer_context(self, cart_id: str, customer_email: str | None) -> None:
+        """Associates this cart_id (a chat session) with a real, logged-in shopper's email —
+        or clears the association when None (anonymous/guest, or the shopper logged out).
+
+        Trust model: `customer_email` is read by the widget from `window.prestashop.customer
+        .email`, a value PrestaShop's own server already rendered into the page for an
+        authenticated session — not a raw value the shopper typed into the chat. It's not
+        cryptographically verified (no signed session token changes hands), which is a
+        reasonable, documented tradeoff for this deliverable but not production-grade;
+        see docker/README-two-stores.md. A resolution failure (unknown email, no address on
+        file) silently falls back to the tenant's demo identity — it never blocks checkout."""
+        if customer_email:
+            self._cart_customer_overrides[cart_id] = customer_email
+        else:
+            self._cart_customer_overrides.pop(cart_id, None)
+
+    def _resolve_checkout_identity(self, cart_id: str) -> tuple[str | None, str | None]:
+        """Returns (customer_id, address_id) — the real shopper's own, if set_customer_context
+        resolved one and they have a saved address, else the tenant's demo defaults."""
+        email = self._cart_customer_overrides.get(cart_id)
+        if email:
+            customer_id = self._resolve_customer_id_by_email(email)
+            if customer_id:
+                address_id = self._resolve_address_for_customer(customer_id)
+                if address_id:
+                    return customer_id, address_id
+        return self._customer_id, self._address_id
+
+    def _resolve_customer_id_by_email(self, email: str) -> str | None:
+        if email not in self._customer_id_by_email_cache:
+            try:
+                data = self._get("/api/customers", {"filter[email]": email})
+            except AdapterUnavailableError:
+                return None
+            customers = self._as_list(data, "customers", "customer")
+            self._customer_id_by_email_cache[email] = str(customers[0]["id"]) if customers else None
+        return self._customer_id_by_email_cache[email]
+
+    def _resolve_address_for_customer(self, customer_id: str) -> str | None:
+        if customer_id not in self._address_id_by_customer_cache:
+            try:
+                data = self._get("/api/addresses", {"filter[id_customer]": customer_id})
+            except AdapterUnavailableError:
+                return None
+            addresses = self._as_list(data, "addresses", "address")
+            self._address_id_by_customer_cache[customer_id] = str(addresses[0]["id"]) if addresses else None
+        return self._address_id_by_customer_cache[customer_id]
 
     def _read_cart(self, id_cart: int) -> Cart:
         data = self._get(f"/api/carts/{id_cart}")

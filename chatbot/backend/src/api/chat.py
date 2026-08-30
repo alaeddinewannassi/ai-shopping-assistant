@@ -41,6 +41,11 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     session_id: str
     message: str
+    # Set by the widget only when window.prestashop.customer.is_logged is true (a real
+    # shopper session), from .email — never a raw id, PrestaShop's front-end doesn't expose
+    # one. None for anonymous/guest browsing. See agent/dialogue.py's handle_turn and
+    # PrestaShopAdapter.set_customer_context for how this changes cart/checkout attribution.
+    customer_email: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -117,7 +122,9 @@ def chat(
     Discovery/navigation (US1), cart propose/confirm/decline (US2), checkout (US3), and
     promo suggestion/apply (US4) intents are fully wired via agent/dialogue.py.
     """
-    reply = handle_turn(runtime.dialogue_ctx, request.session_id, request.message)
+    reply = handle_turn(
+        runtime.dialogue_ctx, request.session_id, request.message, customer_email=request.customer_email
+    )
     session = runtime.dialogue_ctx.session_store.get_or_create(request.session_id)
     return ChatResponse(
         session_id=request.session_id, reply=reply, needs_confirmation=session.pending_action is not None

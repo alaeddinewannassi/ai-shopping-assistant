@@ -163,6 +163,13 @@ class CommerceAdapter(Protocol):
         """Read-only. Creates an empty Cart on first access if none exists yet."""
         ...
 
+    def set_customer_context(self, cart_id: str, customer_email: str | None) -> None:
+        """Associates this cart_id (a chat session) with a real, logged-in shopper's email —
+        or clears it when None. Optional per-platform behavior: an adapter with no concept
+        of shopper identity (e.g. MockAdapter) may no-op. See PrestaShopAdapter's own
+        docstring for the trust model this is built on."""
+        ...
+
     # -- Mutating: only ever called from a confirmed PendingAction --------- #
 
     def add_cart_item(

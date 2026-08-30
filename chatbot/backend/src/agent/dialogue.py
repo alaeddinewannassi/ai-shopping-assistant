@@ -549,11 +549,25 @@ def _upsert_conversation_session(ctx: DialogueContext, session_id: str) -> None:
         pass
 
 
-def handle_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
+def handle_turn(
+    ctx: DialogueContext, session_id: str, message: str, *, customer_email: str | None = None
+) -> str:
     """Handles one conversational turn across US1 (discovery/navigation), US2 (cart
     propose/confirm/decline), US3 (checkout), and US4 (promo suggestions/apply). Any other
-    recognized action_type is acknowledged but not yet actionable."""
+    recognized action_type is acknowledged but not yet actionable.
+
+    `customer_email` (api/chat.py's ChatRequest.customer_email, widget-read from
+    window.prestashop.customer.email) mirrors onto this session every turn — set when a real
+    shopper is logged in, cleared (None) for anonymous/guest or after they log out — and is
+    handed to the adapter so cart/checkout attributes to that real account instead of the
+    tenant's shared demo identity (PrestaShopAdapter.set_customer_context)."""
     with turn_scope(ctx.tenant_id, session_id):
+        session = ctx.session_store.get_or_create(session_id)
+        if session.real_customer_email != customer_email:
+            session.real_customer_email = customer_email
+            ctx.session_store.save(session)
+        ctx.adapter.set_customer_context(session_id, customer_email)
+
         reply = _route_turn(ctx, session_id, message)
         log_turn_completed(session_id)
         _upsert_conversation_session(ctx, session_id)

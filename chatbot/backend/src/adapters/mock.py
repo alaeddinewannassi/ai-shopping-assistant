@@ -209,6 +209,11 @@ class MockAdapter:
             self._cart_version[session_id] = 0
         return self._carts[session_id]
 
+    def set_customer_context(self, cart_id: str, customer_email: str | None) -> None:
+        # MockAdapter has no concept of shopper identity — every test/local-dev cart is
+        # already isolated by session id alone, so there's nothing to associate.
+        pass
+
     # -- Mutating ------------------------------------------------------------ #
 
     def add_cart_item(self, cart_id: str, product_id: str, variant_id: str, quantity: int) -> Cart:

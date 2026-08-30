@@ -51,6 +51,10 @@ class ConversationSession:
     # this shopper was just shown (agent/intents.py's _resolve_reference_to_last_shown),
     # rather than a fresh keyword search that has no idea what "it" refers to.
     last_shown_product_ids: list[str] = field(default_factory=list)
+    # The real, logged-in shopper's email (widget-read from window.prestashop.customer.email
+    # — see PrestaShopAdapter.set_customer_context's docstring for the trust model), or None
+    # for an anonymous/guest session using the tenant's shared demo identity.
+    real_customer_email: str | None = None
     pending_action: PendingAction | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -142,6 +146,7 @@ class SessionStore:
                 navigation_context=data.get("navigation_context", {}),
                 last_shown_products=data.get("last_shown_products", ""),
                 last_shown_product_ids=data.get("last_shown_product_ids", []),
+                real_customer_email=data.get("real_customer_email"),
                 pending_action=PendingAction(**pending) if pending else None,
                 created_at=data.get("created_at", time.time()),
                 updated_at=data.get("updated_at", time.time()),

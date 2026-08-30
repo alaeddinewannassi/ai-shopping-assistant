@@ -26,6 +26,9 @@ describe("assistant-chat-widget", () => {
   afterEach(() => {
     document.body.innerHTML = "";
     vi.restoreAllMocks();
+    // stubGlobal (fetch, prestashop, ...) isn't reset by restoreAllMocks — without this, a
+    // window.prestashop stub set by one test would leak into the next.
+    vi.unstubAllGlobals();
   });
 
   it("renders an input and a send button", () => {
@@ -147,6 +150,54 @@ describe("assistant-chat-widget", () => {
 
     const [, requestInit] = fetchMock.mock.calls[0];
     expect(requestInit.headers["X-Assistant-Key"]).toBeUndefined();
+  });
+
+  it("sends customer_email when PrestaShop reports a logged-in shopper", async () => {
+    vi.stubGlobal("prestashop", { customer: { is_logged: true, email: "shopper@example.com" } });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ session_id: "s1", reply: "Here's what I found: shoes", needs_confirmation: false }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+    const shadow = widget.shadowRoot!;
+    const input = shadow.querySelector<HTMLInputElement>("input")!;
+    const form = shadow.querySelector<HTMLFormElement>("form")!;
+    input.value = "show me shoes";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalled();
+    });
+
+    const [, requestInit] = fetchMock.mock.calls[0];
+    expect(JSON.parse(requestInit.body).customer_email).toBe("shopper@example.com");
+  });
+
+  it("omits customer_email for an anonymous/guest shopper", async () => {
+    vi.stubGlobal("prestashop", { customer: { is_logged: false, email: null } });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ session_id: "s1", reply: "Here's what I found: shoes", needs_confirmation: false }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+    const shadow = widget.shadowRoot!;
+    const input = shadow.querySelector<HTMLInputElement>("input")!;
+    const form = shadow.querySelector<HTMLFormElement>("form")!;
+    input.value = "show me shoes";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalled();
+    });
+
+    const [, requestInit] = fetchMock.mock.calls[0];
+    expect(JSON.parse(requestInit.body).customer_email).toBeUndefined();
   });
 
   it("restores the visible transcript after a simulated page navigation", async () => {

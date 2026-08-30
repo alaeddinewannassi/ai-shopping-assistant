@@ -53,9 +53,13 @@ respectively, per `docker-compose.yml`'s defaults):
 
 1. **Advanced Parameters → Webservice** → turn it on, add a key with GET/PUT/POST/DELETE on
    `products`, `categories`, `combinations`, `product_options`, `product_option_values`,
-   `stock_availables`, `carts`, `cart_rules`, `orders`, `specific_prices` (this last one is
+   `stock_availables`, `carts`, `cart_rules`, `orders`, `specific_prices` (this one is
    how a validated promo actually gets applied to a cart — miss it and `apply_promo` 403s
-   even though `validate_promo` works fine). Copy the key.
+   even though `validate_promo` works fine), `customers` (checkout fetches the paying
+   customer's record on every order — miss it and checkout fails outright, even with
+   everything else configured correctly), and `addresses` (only needed for real per-shopper
+   checkout attribution — see "Real shopper identity" below; without it, every order still
+   falls back safely to the demo customer). Copy the key.
 2. **Customers → Add new** → create one, then add an address for them. Note both ids.
 3. **Shipping → Carriers** → note an enabled carrier's id (the stock install ships one).
 4. Optional, for the promo-suggestion feature: **Catalog → Discounts → Cart Rules**, create
@@ -108,6 +112,36 @@ assistant to "show me the jackets category" returns that category's products as 
 reply**, not a real page navigation — the widget never does `window.location`. Chatting
 and browsing the actual storefront pages are two separate things you're testing side by
 side, not one driving the other.
+
+## Real shopper identity (optional)
+
+By default every order the assistant places is attributed to the one demo customer you
+configured in step 2 — real per-shopper checkout is opt-in and needs the `customers` and
+`addresses` webservice permissions from step 1.
+
+To test it: register/log into the storefront as a real customer (**Sign in → Create
+account**, `/registration`), add a delivery address to that account (**My account →
+Addresses**), then chat with the widget while logged in on that same page. The widget reads
+`window.prestashop.customer.email` (present only for a logged-in session — PrestaShop's
+front-end never exposes a raw customer id to client-side JS) and sends it with every chat
+message; the backend resolves your real `id_customer` and address via the webservice and
+uses them for that session's cart/checkout instead of the demo identity.
+
+**Trust model, worth understanding before you rely on this**: the backend doesn't
+cryptographically verify that email belongs to whoever is actually driving the browser — it
+trusts a value read from the page, which PrestaShop's own server already decided was true
+for this authenticated session. That's a reasonable, deliberate simplification for this
+deliverable (see `PrestaShopAdapter.set_customer_context`'s docstring), not something to
+carry into a real payments flow without adding actual signed-session verification.
+
+If resolution fails for any reason (not logged in, no saved address, a webservice error),
+it silently and safely falls back to the demo identity — real-customer checkout is a
+best-effort enhancement, never a hard requirement.
+
+**Known gap**: even with correct order attribution, PrestaShop's own native mini-cart/
+header icon won't visually update when the chatbot adds something — that's a separate,
+larger integration (syncing PrestaShop's own cart cookie) that's out of scope here. Ask the
+chatbot "what's in my cart?" to see the real state instead.
 
 ## 5. Verify in the backoffice — one login, both stores
 

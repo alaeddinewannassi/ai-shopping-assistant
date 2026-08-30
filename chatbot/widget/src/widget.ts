@@ -230,6 +230,22 @@ export class AssistantChatWidget extends HTMLElement {
     return this.getAttribute("tenant-key") || undefined;
   }
 
+  // PrestaShop's own theme renders `window.prestashop.customer` for every front-office page
+  // load — `.email` only, never a numeric id (PrestaShop's front-end deliberately doesn't
+  // expose one to client-side JS). Present only for a genuinely logged-in shopper; undefined
+  // for anonymous/guest browsing, matching the API's own optional customer_email field.
+  private get customerEmail(): string | undefined {
+    try {
+      const ps = (window as unknown as { prestashop?: { customer?: { is_logged?: boolean; email?: string } } })
+        .prestashop;
+      return ps?.customer?.is_logged ? ps.customer.email || undefined : undefined;
+    } catch {
+      // window.prestashop absent entirely (widget embedded outside a PrestaShop page, e.g.
+      // the e2e demo harness) — anonymous/guest behavior is the correct fallback either way.
+      return undefined;
+    }
+  }
+
   /** DOM-only — renders one message bubble without touching stored history. Used both by
    * appendMessage() (a genuinely new message) and connectedCallback() (replaying history
    * already in storage, which must not be re-saved as if it were new). */
@@ -270,6 +286,7 @@ export class AssistantChatWidget extends HTMLElement {
         this.sessionId,
         message,
         this.tenantKey,
+        this.customerEmail,
       );
       this.appendMessage(reply, "assistant", needs_confirmation);
     } catch {
