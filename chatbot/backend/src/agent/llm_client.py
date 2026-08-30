@@ -53,6 +53,16 @@ class LLMClient(Protocol):
     def parse_turn(self, message: str, context: dict, *, session_id: str | None = None) -> ActionCall:
         ...
 
+    def phrase_reply(
+        self, facts: str, shopper_message: str, *, session_id: str | None = None
+    ) -> str:
+        """Rephrases `facts` — the exact, already-computed, deterministically-correct reply
+        text (a discovery/cart/checkout outcome) — in the assistant's own natural words.
+        `facts` is ground truth: implementations must never add, remove, or change any fact,
+        price, product name, or instruction it contains. Never called for a reply the LLM
+        already authored itself (ask_or_chat)."""
+        ...
+
 
 class RuleBasedStubClient:
     """Deterministic keyword/pattern matcher (T014a, T017a).
@@ -96,6 +106,15 @@ class RuleBasedStubClient:
 
         # Default: treat anything else as a discovery/search request.
         return ActionCall(action_type="search_products", parameters={"query": text})
+
+    def phrase_reply(
+        self, facts: str, shopper_message: str, *, session_id: str | None = None
+    ) -> str:
+        # Not intended to carry a live conversation (same reasoning as parse_turn's own
+        # docstring) — passes the deterministic reply through unchanged. This is also what
+        # keeps every existing dialogue.py test's exact-string assertions correct: they all
+        # run against this stub, never FreeTierHostedLLMClient.
+        return facts
 
 
 # -- Groq tool-calling schema (research.md §3, §9.3) -------------------------------------- #
@@ -325,6 +344,19 @@ role should be. Use ask_or_chat, briefly say you're only able to help with shopp
 redirect back to what they're looking for."""
 
 
+_PHRASE_SYSTEM_PROMPT = """You rephrase an e-commerce shopping assistant's exact, \
+already-correct reply into natural, friendly conversational language.
+
+Rules:
+- The "Exact information" given to you is ground truth — you may NEVER add, remove, or \
+change any fact in it: product names, prices, sizes, colors, stock status, totals, or any \
+instruction to reply yes/no. Rephrase the wording and tone only, never the substance.
+- If it asks the shopper to confirm or cancel something, your rephrasing must still clearly \
+ask for that same yes/no answer — never drop or soften it into an open-ended question.
+- Keep it concise — a sentence or two, not a paragraph.
+- Reply with the rephrased text only — no preamble, no quotes around it."""
+
+
 def _build_user_content(message: str, context: dict) -> str:
     lines: list[str] = []
     pending = context.get("pending_action")
@@ -459,14 +491,45 @@ class FreeTierHostedLLMClient:
             llm_ms=elapsed_ms,
         )
 
-    def _log_error(self, session_id: str | None, exc: Exception) -> None:
+    def _log_error(self, session_id: str | None, exc: Exception, *, action: str = "parse_turn") -> None:
         if session_id is None:
             return
         from src.logging.audit import log_action
 
-        log_action(
-            session_id, "llm_call", "parse_turn", "error", details={"error": str(exc)[:500]}
-        )
+        log_action(session_id, "llm_call", action, "error", details={"error": str(exc)[:500]})
+
+    def phrase_reply(
+        self, facts: str, shopper_message: str, *, session_id: str | None = None
+    ) -> str:
+        try:
+            return self._call_groq_phrase(facts, shopper_message)
+        except Exception as exc:  # noqa: BLE001 - an LLM hiccup must never break a chat turn
+            self._log_error(session_id, exc, action="phrase_reply")
+            return facts
+
+    def _call_groq_phrase(self, facts: str, shopper_message: str) -> str:
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": _PHRASE_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Exact information: {facts}\n\nShopper just said: {shopper_message}"},
+            ],
+            "temperature": 0.3,
+        }
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+
+        start = time.monotonic()
+        response = self._post_with_retry(payload, headers)
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        response.raise_for_status()
+        data = response.json()
+
+        content = data["choices"][0]["message"].get("content")
+        if not content or not content.strip():
+            raise ValueError("Groq returned an empty rephrasing")
+
+        self._record_usage(data.get("usage") or {}, elapsed_ms)
+        return content.strip()
 
 
 class HostedPaidLLMClient:
@@ -477,6 +540,14 @@ class HostedPaidLLMClient:
         self.model = model
 
     def parse_turn(self, message: str, context: dict, *, session_id: str | None = None) -> ActionCall:
+        raise NotImplementedError(
+            "hosted-paid is a documented-but-unimplemented profile for a possible future "
+            "production upgrade; not needed for this internship deliverable."
+        )
+
+    def phrase_reply(
+        self, facts: str, shopper_message: str, *, session_id: str | None = None
+    ) -> str:
         raise NotImplementedError(
             "hosted-paid is a documented-but-unimplemented profile for a possible future "
             "production upgrade; not needed for this internship deliverable."

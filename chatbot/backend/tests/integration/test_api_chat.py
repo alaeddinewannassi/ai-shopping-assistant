@@ -30,6 +30,7 @@ def test_chat_endpoint_routes_a_discovery_turn_end_to_end() -> None:
     body = resp.json()
     assert body["session_id"] == "http-test-1"
     assert "T-Shirt" in body["reply"] or "shirt" in body["reply"].lower()
+    assert body["needs_confirmation"] is False  # a plain search never proposes anything
 
 
 def test_chat_endpoint_routes_a_full_add_to_cart_confirmation_flow() -> None:
@@ -38,6 +39,10 @@ def test_chat_endpoint_routes_a_full_add_to_cart_confirmation_flow() -> None:
         "/chat", json={"session_id": session_id, "message": "add the red classic t-shirt to my cart"}
     )
     assert "confirm" in propose.json()["reply"].lower()
+    # Structural, not text-matched — set from whether a PendingAction genuinely exists
+    # (session.pending_action), independent of how the reply happens to be phrased.
+    assert propose.json()["needs_confirmation"] is True
 
     confirm = client.post("/chat", json={"session_id": session_id, "message": "yes"})
     assert "t-shirt" in confirm.json()["reply"].lower()
+    assert confirm.json()["needs_confirmation"] is False  # spent — nothing left pending

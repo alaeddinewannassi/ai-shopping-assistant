@@ -518,6 +518,11 @@ _SKIP_PROMO_SUGGESTION_AFTER = {
     "request_checkout",
 }
 
+# Action types whose reply may be handed to phrase_reply for natural rephrasing — read-only
+# discovery only. See _route_turn's comment for why cart/checkout/confirm/decline/promo never
+# are: a real test proved the model can fabricate a false mutation-completion claim.
+_PHRASABLE_ACTION_TYPES = {"search_products", "navigate_to", "get_product_details"}
+
 
 def _upsert_conversation_session(ctx: DialogueContext, session_id: str) -> None:
     """Best-effort per-session analytics summary (T309) — a no-op with no tenant resolved
@@ -643,6 +648,31 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         )
 
     if action.action_type in _SKIP_PROMO_SUGGESTION_AFTER:
-        return reply
-    return _maybe_suggest_promo(ctx, session_id, reply)
+        final_reply = reply
+    else:
+        final_reply = _maybe_suggest_promo(ctx, session_id, reply)
+
+    if action.action_type == "ask_or_chat":
+        # Already the LLM's own words — rephrasing an LLM's own output would just spend a
+        # second call for no benefit.
+        return final_reply
+
+    # Natural LLM phrasing is scoped to read-only discovery replies ONLY. A live test proved
+    # the real, concrete risk of going further: asked to rephrase what was actually an
+    # unresolved AMBIGUOUS_PRODUCT clarifying question (nothing proposed, session.pending_action
+    # was None), the model fabricated "Got it — I've added the Hummingbird printed sweater in
+    # size M to your cart." — a false claim of a mutation that never happened. That's not a
+    # stylistic risk, it's a direct violation of confirm-before-mutate (Constitution Principle
+    # III): a shopper could believe an order/cart change occurred when it didn't. So cart/
+    # checkout/promo/confirm/decline replies, and ANY reply that now carries a fresh pending
+    # confirmation (e.g. a proactive promo suggestion tacked onto an otherwise read-only
+    # reply), always stay exact templates — never handed to phrase_reply.
+    if action.action_type not in _PHRASABLE_ACTION_TYPES or session.pending_action is not None:
+        return final_reply
+
+    # `final_reply` here is exact, deterministic, already-correct ground truth (search
+    # results / product details) — phrase_reply may only rephrase it naturally, never
+    # add/remove/change a fact (llm_client.py's _PHRASE_SYSTEM_PROMPT). RuleBasedStubClient
+    # passes it through unchanged, so every existing exact-string test keeps working untouched.
+    return ctx.llm_client.phrase_reply(final_reply, message, session_id=session_id)
 

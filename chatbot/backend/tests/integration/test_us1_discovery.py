@@ -160,6 +160,9 @@ class _ScriptedLLMClient:
     def parse_turn(self, message: str, context: dict, *, session_id: str | None = None) -> ActionCall:
         return self._action
 
+    def phrase_reply(self, facts: str, shopper_message: str, *, session_id: str | None = None) -> str:
+        return facts
+
 
 def test_ask_or_chat_returns_the_llms_text_directly(
     adapter: MockAdapter, session_store: SessionStore

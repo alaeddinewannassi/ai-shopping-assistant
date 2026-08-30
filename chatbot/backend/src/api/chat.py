@@ -46,6 +46,11 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     session_id: str
     reply: str
+    # Structural, not text-matched — a PendingAction genuinely exists (or doesn't) regardless
+    # of how the reply happens to be phrased (agent/llm_client.py's phrase_reply may rewrite
+    # the wording, so the widget can no longer infer this by scanning the reply text for a
+    # literal "reply 'yes' to confirm" marker the way it originally did).
+    needs_confirmation: bool = False
 
 
 def _check_redis() -> str:
@@ -113,7 +118,10 @@ def chat(
     promo suggestion/apply (US4) intents are fully wired via agent/dialogue.py.
     """
     reply = handle_turn(runtime.dialogue_ctx, request.session_id, request.message)
-    return ChatResponse(session_id=request.session_id, reply=reply)
+    session = runtime.dialogue_ctx.session_store.get_or_create(request.session_id)
+    return ChatResponse(
+        session_id=request.session_id, reply=reply, needs_confirmation=session.pending_action is not None
+    )
 
 
 @app.get("/audit/{session_id}")

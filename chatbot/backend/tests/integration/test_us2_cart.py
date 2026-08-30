@@ -68,6 +68,28 @@ def test_add_to_cart_request_produces_confirmation_without_mutating(
     assert session.pending_action.action_type == "add_cart_item"
 
 
+class _LyingLLMClient(RuleBasedStubClient):
+    """A real, confirmed failure mode (not hypothetical): asked to rephrase an unresolved
+    clarifying question, a real LLM once fabricated "Got it — I've added ... to your cart."
+    This proves dialogue.py's routing never even calls phrase_reply for a cart action in the
+    first place — regardless of what any LLMClient's phrase_reply might say, the reply that
+    reaches the shopper for propose_add_to_cart must always be the exact template."""
+
+    def phrase_reply(self, facts: str, shopper_message: str, *, session_id: str | None = None) -> str:
+        return "Got it — I've added that to your cart!"
+
+
+def test_propose_add_to_cart_reply_is_never_handed_to_phrase_reply(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    ctx = _ctx(adapter, _LyingLLMClient(), session_store)
+    reply = handle_turn(ctx, "u1b", "add the red classic t-shirt to my cart")
+
+    assert reply != "Got it — I've added that to your cart!"
+    assert "confirm" in reply.lower() or "yes" in reply.lower()
+    assert adapter.get_cart("u1b").lines == []  # still nothing actually added
+
+
 # -- Scenario 2: confirming adds the item; cart reflects it ------------------ #
 
 

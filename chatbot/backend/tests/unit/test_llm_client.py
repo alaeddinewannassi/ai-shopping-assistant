@@ -54,6 +54,11 @@ def test_stub_recognizes_checkout_intent(stub: RuleBasedStubClient) -> None:
     assert action.action_type == "request_checkout"
 
 
+def test_stub_phrase_reply_passes_facts_through_unchanged(stub: RuleBasedStubClient) -> None:
+    facts = "Here's what I found: Classic T-Shirt ($19.99)"
+    assert stub.phrase_reply(facts, "show me t-shirts") == facts
+
+
 def test_create_llm_client_defaults_to_free_tier_hosted(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LLM_PROVIDER", raising=False)
     monkeypatch.setenv("LLM_API_KEY", "fake-key-for-test")
@@ -272,3 +277,41 @@ def test_groq_client_returns_ask_or_chat_for_a_greeting() -> None:
     action = client.parse_turn("hello", {})
     assert action.action_type == "ask_or_chat"
     assert action.parameters == {"text": "Hi there! What are you shopping for today?"}
+
+
+def _plain_response(content: str, *, prompt_tokens: int = 30, completion_tokens: int = 12):
+    return httpx.Response(
+        200,
+        json={
+            "choices": [{"message": {"content": content}}],
+            "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
+        },
+    )
+
+
+def test_phrase_reply_returns_the_models_rephrasing() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert "tools" not in body  # phrasing is a plain completion, not a tool call
+        assert "Exact information" in body["messages"][1]["content"]
+        return _plain_response("Sure thing — I found a Classic T-Shirt for $19.99!")
+
+    client = FreeTierHostedLLMClient(api_key="fake-key", client=_mock_client(handler))
+    result = client.phrase_reply("Here's what I found: Classic T-Shirt ($19.99)", "show me t-shirts")
+    assert result == "Sure thing — I found a Classic T-Shirt for $19.99!"
+
+
+def test_phrase_reply_falls_back_to_the_original_facts_on_error() -> None:
+    client = FreeTierHostedLLMClient(
+        api_key="fake-key", client=_mock_client(lambda r: httpx.Response(500))
+    )
+    result = client.phrase_reply("Here's what I found: Classic T-Shirt ($19.99)", "show me t-shirts")
+    assert result == "Here's what I found: Classic T-Shirt ($19.99)"
+
+
+def test_phrase_reply_falls_back_on_empty_content() -> None:
+    client = FreeTierHostedLLMClient(
+        api_key="fake-key", client=_mock_client(lambda r: _plain_response(""))
+    )
+    result = client.phrase_reply("Here's what I found: Classic T-Shirt ($19.99)", "show me t-shirts")
+    assert result == "Here's what I found: Classic T-Shirt ($19.99)"

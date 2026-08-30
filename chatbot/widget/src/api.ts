@@ -3,6 +3,7 @@
 export interface ChatResponse {
   session_id: string;
   reply: string;
+  needs_confirmation: boolean;
 }
 
 export async function sendChatMessage(
@@ -27,14 +28,4 @@ export async function sendChatMessage(
     throw new Error(`Assistant service returned ${resp.status}`);
   }
   return (await resp.json()) as ChatResponse;
-}
-
-// Phrasing the backend's dialogue layer (agent/dialogue.py) always appends to a proposed
-// mutation's recap (see recap.py) — used to render confirmation prompts distinctly from
-// plain read-only replies, per tasks.md T063.
-const CONFIRMATION_MARKERS = ["reply 'yes' to confirm"];
-
-export function needsConfirmation(reply: string): boolean {
-  const lower = reply.toLowerCase();
-  return CONFIRMATION_MARKERS.some((marker) => lower.includes(marker));
 }

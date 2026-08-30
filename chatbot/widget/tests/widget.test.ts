@@ -43,6 +43,7 @@ describe("assistant-chat-widget", () => {
       json: async () => ({
         session_id: "s1",
         reply: "Here's what I found: Classic T-Shirt ($19.99)",
+        needs_confirmation: false,
       }),
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -75,7 +76,11 @@ describe("assistant-chat-widget", () => {
       ok: true,
       json: async () => ({
         session_id: "s1",
-        reply: "Add 1 x Classic T-Shirt (reply 'yes' to confirm or 'no' to cancel)",
+        // needs_confirmation is structural (from ChatResponse), not inferred from the reply
+        // text — the phrasing itself can vary since agent/llm_client.py's phrase_reply may
+        // rewrite it naturally.
+        reply: "Sounds good! Shall I add one Classic T-Shirt to your cart?",
+        needs_confirmation: true,
       }),
     });
     vi.stubGlobal("fetch", fetchMock);
