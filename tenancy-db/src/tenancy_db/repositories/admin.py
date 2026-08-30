@@ -63,6 +63,18 @@ class TenantMembershipRepository:
             membership = self._session.scalars(stmt).first()
             return membership.role if membership else None
 
+    def set_role(self, tenant_id: uuid.UUID, admin_user_id: uuid.UUID, role: AdminRole) -> None:
+        with scoped_to_tenant(self._session, tenant_id):
+            stmt = sa.select(TenantMembership).where(
+                TenantMembership.tenant_id == tenant_id,
+                TenantMembership.admin_user_id == admin_user_id,
+            )
+            membership = self._session.scalars(stmt).first()
+            if membership is None:
+                raise ValueError("No existing membership to update — use add_member instead.")
+            membership.role = role
+            self._session.flush()
+
     def list_members_for_user(self, admin_user_id: uuid.UUID) -> list[TenantMembership]:
         """Deliberately cross-tenant — answers "which tenants can this admin see," which is
         inherently not scoped to any single tenant (GET /auth/me, the backoffice's tenant

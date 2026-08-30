@@ -66,6 +66,10 @@ npm install && npm run build
 #   <assistant-chat-widget api-base="http://localhost:8000"></assistant-chat-widget>
 ```
 
+For a hands-on, two-tenant walkthrough — two real PrestaShop stores with the widget
+already embedded, one backoffice login managing both — see
+[`docker/README-two-stores.md`](docker/README-two-stores.md).
+
 The backoffice (admin dashboard) is a separate project with its own setup —
 see [`backoffice/README.md`](backoffice/README.md), including how to migrate an existing
 single-tenant deployment into it without losing its promo rules.

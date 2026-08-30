@@ -16,7 +16,15 @@ services:
       retries: 10
 
   prestashop:
-    image: prestashop/prestashop:8-apache
+    build:
+      context: ..
+      dockerfile: docker/prestashop/Dockerfile
+      args:
+        # Fixed, not random — the provisioning step (docker/prestashop/README.md) issues
+        # this SAME string as the tenant's widget key in the tenancy DB, so the widget
+        # baked into this store's footer resolves to the right tenant from its first load.
+        WIDGET_TENANT_KEY: ${WIDGET_TENANT_KEY_ONE:-demo-widget-key-store-one}
+        WIDGET_API_BASE: ${WIDGET_API_BASE:-http://localhost:8000}
     depends_on:
       mysql:
         condition: service_healthy
@@ -36,6 +44,55 @@ services:
       - "8080:80"
     volumes:
       - prestashop_data:/var/www/html
+      - ./prestashop:/tmp/fixtures:ro
+
+  # Second reference store — a fully independent PrestaShop + MySQL pair, used to prove
+  # real multi-tenancy manually: two live "shopping websites" whose adapter config lives in
+  # two different Tenant rows, served by the SAME chatbot/backend and administered from the
+  # SAME backoffice login (chatbot/backend/src/tenancy/resolver.py resolves per-request from
+  # the X-Assistant-Key header — there is nothing store-specific baked into the process).
+  mysql-two:
+    image: mysql:8.0
+    command: --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_TWO_ROOT_PASSWORD:-prestashop_root_two}
+      MYSQL_DATABASE: ${MYSQL_TWO_DATABASE:-prestashop_two}
+      MYSQL_USER: ${MYSQL_TWO_USER:-prestashop_two}
+      MYSQL_PASSWORD: ${MYSQL_TWO_PASSWORD:-prestashop_two}
+    volumes:
+      - prestashop_db_two:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_TWO_ROOT_PASSWORD:-prestashop_root_two}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  prestashop-two:
+    build:
+      context: ..
+      dockerfile: docker/prestashop/Dockerfile
+      args:
+        WIDGET_TENANT_KEY: ${WIDGET_TENANT_KEY_TWO:-demo-widget-key-store-two}
+        WIDGET_API_BASE: ${WIDGET_API_BASE:-http://localhost:8000}
+    depends_on:
+      mysql-two:
+        condition: service_healthy
+    environment:
+      DB_SERVER: mysql-two
+      DB_NAME: ${MYSQL_TWO_DATABASE:-prestashop_two}
+      DB_USER: ${MYSQL_TWO_USER:-prestashop_two}
+      DB_PASSWD: ${MYSQL_TWO_PASSWORD:-prestashop_two}
+      PS_DOMAIN: ${PS_DOMAIN_TWO:-localhost:8090}
+      PS_FOLDER_ADMIN: ${PS_FOLDER_ADMIN:-admin}
+      PS_FOLDER_INSTALL: ${PS_FOLDER_INSTALL:-install}
+      PS_INSTALL_AUTO: ${PS_INSTALL_AUTO:-1}
+      PS_ENABLE_SSL: 0
+      ADMIN_MAIL: ${PS_ADMIN_EMAIL_TWO:-demo-two@example.com}
+      ADMIN_PASSWD: ${PS_ADMIN_PASSWORD_TWO:-AssistantDemo123!}
+    ports:
+      - "8090:80"
+    volumes:
+      - prestashop_data_two:/var/www/html
       - ./prestashop:/tmp/fixtures:ro
 
   redis:
@@ -71,11 +128,18 @@ services:
     depends_on:
       prestashop:
         condition: service_started
+      prestashop-two:
+        condition: service_started
       redis:
         condition: service_started
       postgres:
         condition: service_healthy
     environment:
+      # Vestigial for the two-tenant manual test below: once both tenants exist as DB rows
+      # with their own TenantAdapterConfig, resolver.py resolves each request's adapter
+      # config from the X-Assistant-Key header, never from these process-level env vars.
+      # They only matter for a request with NO assistant key, falling back to
+      # DEFAULT_TENANT_SLUG's legacy single-tenant config (plan.md D2).
       PRESTASHOP_BASE_URL: http://prestashop/api
       # PrestaShop redirects any request whose Host header doesn't match its configured
       # PS_DOMAIN — override it here since we reach the store via the internal Docker
@@ -125,5 +189,7 @@ services:
 volumes:
   prestashop_db:
   prestashop_data:
+  prestashop_db_two:
+  prestashop_data_two:
   redis_data:
   assistant_db:
