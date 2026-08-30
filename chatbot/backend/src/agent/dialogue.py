@@ -130,8 +130,11 @@ def _record_navigation(
         changed = True
     if outcome.products:
         # Fed back as LLM context on the NEXT turn (_build_llm_context) so a follow-up like
-        # "does it fit a young man?" has something real to connect "it" to.
+        # "does it fit a young man?" has something real to connect "it" to, and as the
+        # deterministic reference list a bare "add it"/"the second one" resolves against
+        # (CartIntentHandler.resolve_add_to_cart) — same 5-item cap as _format_products.
         session.last_shown_products = _format_products(outcome.products)
+        session.last_shown_product_ids = [p.id for p in outcome.products[:5]]
         changed = True
     if changed:
         session_store.save(session)
@@ -151,9 +154,11 @@ def _products_by_id_for_cart(ctx: DialogueContext, cart) -> dict:
     return products_by_id
 
 
-def _handle_propose_add_to_cart(ctx: DialogueContext, session_id: str, raw_text: str) -> str:
+def _handle_propose_add_to_cart(
+    ctx: DialogueContext, session_id: str, raw_text: str, last_shown_ids: list[str]
+) -> str:
     assert ctx.cart_handler is not None and ctx.pending_gate is not None
-    resolution = ctx.cart_handler.resolve_add_to_cart(raw_text)
+    resolution = ctx.cart_handler.resolve_add_to_cart(raw_text, last_shown_ids)
 
     if resolution.kind == CartResolutionKind.UNAVAILABLE:
         log_action(session_id, "propose_add_to_cart", "search_products", "unavailable")
@@ -572,7 +577,9 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         reply = render_discovery_reply(outcome)
 
     elif action.action_type == "propose_add_to_cart" and ctx.cart_handler and ctx.pending_gate:
-        reply = _handle_propose_add_to_cart(ctx, session_id, action.parameters.get("raw_text", message))
+        reply = _handle_propose_add_to_cart(
+            ctx, session_id, action.parameters.get("raw_text", message), session.last_shown_product_ids
+        )
 
     elif action.action_type == "propose_update_cart" and ctx.cart_handler and ctx.pending_gate:
         reply = _handle_propose_cart_line_change(

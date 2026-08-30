@@ -46,6 +46,11 @@ class ConversationSession:
     # right after a search result has zero connection to what was just shown — the LLM has
     # no way to know what "it" refers to, even though the shopper can see it right above.
     last_shown_products: str = ""
+    # Ordered product ids backing last_shown_products (same list, same order) — lets a
+    # follow-up "add it" / "the second one" resolve deterministically against exactly what
+    # this shopper was just shown (agent/intents.py's _resolve_reference_to_last_shown),
+    # rather than a fresh keyword search that has no idea what "it" refers to.
+    last_shown_product_ids: list[str] = field(default_factory=list)
     pending_action: PendingAction | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -136,6 +141,7 @@ class SessionStore:
                 cart_id=data.get("cart_id"),
                 navigation_context=data.get("navigation_context", {}),
                 last_shown_products=data.get("last_shown_products", ""),
+                last_shown_product_ids=data.get("last_shown_product_ids", []),
                 pending_action=PendingAction(**pending) if pending else None,
                 created_at=data.get("created_at", time.time()),
                 updated_at=data.get("updated_at", time.time()),

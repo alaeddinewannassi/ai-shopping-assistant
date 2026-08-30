@@ -240,6 +240,34 @@ def _value_mentioned(value: str, text_lower: str) -> bool:
     return re.search(rf"\b{re.escape(value.lower())}\b", text_lower) is not None
 
 
+_ORDINAL_WORDS = {"first": 0, "second": 1, "third": 2, "fourth": 3, "fifth": 4}
+_ORDINAL_PATTERN = re.compile(r"\b(first|second|third|fourth|fifth|last)\b", re.IGNORECASE)
+# A bare pronoun with no distinguishing words of its own ("add it", "add that one") only
+# resolves unambiguously when exactly one product was last shown — with several, "it" alone
+# genuinely doesn't say which one, and guessing would be worse than asking.
+_BARE_REFERENCE_TERMS = {"", "it", "that", "this", "one", "that one", "this one"}
+
+
+def _resolve_reference_to_last_shown(raw_text: str, last_shown_ids: list[str]) -> str | None:
+    """Resolves a pronoun ("add it") or ordinal ("the second one") reference against the
+    product ids most recently shown to this shopper (ConversationSession.last_shown_product_ids)
+    — returns that product's id, or None if raw_text isn't this kind of reference, or there's
+    nothing recent to resolve it against."""
+    if not last_shown_ids:
+        return None
+
+    ordinal_match = _ORDINAL_PATTERN.search(raw_text.lower())
+    if ordinal_match:
+        word = ordinal_match.group(1)
+        index = len(last_shown_ids) - 1 if word == "last" else _ORDINAL_WORDS[word]
+        return last_shown_ids[index] if 0 <= index < len(last_shown_ids) else None
+
+    if _clean_reference_term(raw_text) in _BARE_REFERENCE_TERMS:
+        return last_shown_ids[0] if len(last_shown_ids) == 1 else None
+
+    return None
+
+
 class CartResolutionKind(str, Enum):
     RESOLVED = "resolved"
     AMBIGUOUS_PRODUCT = "ambiguous_product"
@@ -271,9 +299,31 @@ class CartIntentHandler:
     def __init__(self, adapter: CommerceAdapter) -> None:
         self._adapter = adapter
 
-    def resolve_add_to_cart(self, raw_text: str) -> CartResolution:
-        """US2 Scenario 1 (resolve what to add) + Scenario 5 (out-of-stock)."""
+    def resolve_add_to_cart(
+        self, raw_text: str, last_shown_ids: list[str] | None = None
+    ) -> CartResolution:
+        """US2 Scenario 1 (resolve what to add) + Scenario 5 (out-of-stock).
+
+        `last_shown_ids` (session.last_shown_product_ids, dialogue.py's own record of what
+        this shopper was just shown) lets a bare pronoun ("add it") or ordinal ("the second
+        one") resolve against that instead of falling through to a fresh keyword search that
+        has no idea what "it" refers to."""
         quantity = _extract_quantity(raw_text)
+
+        referenced_id = _resolve_reference_to_last_shown(raw_text, last_shown_ids or [])
+        if referenced_id is not None:
+            try:
+                product = self._adapter.get_product(referenced_id)
+            except AdapterUnavailableError as exc:
+                _log_unavailable(f"add_to_cart:ref:{referenced_id}", exc)
+                return CartResolution(kind=CartResolutionKind.UNAVAILABLE)
+            except ProductNotFoundError:
+                product = None
+            if product is not None:
+                return self._resolve_variant_and_stock(product, raw_text, quantity)
+            # Referenced a product that's since disappeared (deleted/deactivated) — fall
+            # through to the ordinary keyword search below rather than dead-ending here.
+
         term = _clean_reference_term(raw_text)
 
         try:
@@ -301,7 +351,11 @@ class CartIntentHandler:
                 kind=CartResolutionKind.AMBIGUOUS_PRODUCT, candidates=[p.name for p in products[:5]]
             )
 
-        product = products[0]
+        return self._resolve_variant_and_stock(products[0], raw_text, quantity)
+
+    def _resolve_variant_and_stock(
+        self, product: Product, raw_text: str, quantity: int
+    ) -> CartResolution:
         variant = self._resolve_variant(product, raw_text)
         if variant is None:
             options = [

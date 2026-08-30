@@ -210,3 +210,30 @@ def test_backend_unreachable_during_confirm_does_not_assume_success(
 
     adapter.simulate_outage(False)
     assert adapter.get_cart("u8").lines == []  # never assumed success
+
+
+# -- Reference resolution: "add it" / "the first one" against what was just shown -------- #
+
+
+def test_add_it_resolves_against_the_single_last_shown_product(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    ctx = _ctx(adapter, llm_client, session_store)
+    handle_turn(ctx, "u9", "show me jackets")
+
+    reply = handle_turn(ctx, "u9", "add it to my cart")
+
+    assert "couldn't find a product" not in reply.lower()
+    assert "Blue Jacket" in reply
+
+
+def test_add_the_first_one_resolves_by_ordinal(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    ctx = _ctx(adapter, llm_client, session_store)
+    handle_turn(ctx, "u10", "show me jackets")
+
+    reply = handle_turn(ctx, "u10", "add the first one to my cart")
+
+    assert "couldn't find a product" not in reply.lower()
+    assert "Blue Jacket" in reply
