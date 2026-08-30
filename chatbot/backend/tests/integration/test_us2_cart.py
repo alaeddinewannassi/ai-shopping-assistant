@@ -299,6 +299,33 @@ def test_add_pronoun_with_variant_descriptor_resolves_against_the_single_last_sh
     assert "Blue Jacket" in reply
 
 
+def test_short_leftover_term_falls_back_to_single_last_shown_product(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    """Regression test for a real bug reported from live testing: after "show me jackets"
+    shows exactly one jacket, a vague confirmation like "please add it, go for it" cleans
+    down to "it go it" after cart-stopword-stripping — no token longer than 2 chars survives.
+    Both CommerceAdapter implementations treat a query with no such token as "nothing
+    meaningful to filter on" and deliberately return the WHOLE catalog unfiltered (reasonable
+    for a bare discovery browse like "show me what you have") — but _resolve_single_product
+    was calling search_products with exactly that leftover term, so `products` was never
+    empty and its "single last-shown item -> default to it" fallback never triggered. Live,
+    this surfaced as an unrelated, catalog-wide "did you mean" list (t-shirts, framed
+    posters, ...) instead of the one item the shopper had just been shown and was clearly
+    replying about."""
+    ctx = _ctx(adapter, llm_client, session_store)
+    handle_turn(ctx, "u18", "show me jackets")
+
+    reply = handle_turn(ctx, "u18", "please add it, go for it")
+
+    assert "couldn't find a product" not in reply.lower()
+    assert "Blue Jacket" in reply
+    session = session_store.get_or_create("u18")
+    # Resolved against the SPECIFIC last-shown jacket, not an arbitrary catalog-wide guess —
+    # this is what a "did you mean: <random unrelated products>" reply would have failed.
+    assert session.pending_variant_product_name == "Blue Jacket"
+
+
 def test_hyphenless_product_name_correctly_narrows_to_one_match(adapter: MockAdapter) -> None:
     """Regression test for a real bug: "add the tshirt not the jacket" correctly found the
     t-shirt in the initial broad search (fold-matching handles "tshirt" vs "t-shirt"), but

@@ -319,7 +319,19 @@ def _resolve_single_product(
             pass  # referenced product has since disappeared — fall through to keyword search
 
     term = _clean_reference_term(raw_text)
-    products = adapter.search_products(query=term)
+    # Both CommerceAdapter implementations treat a query with no token longer than 2 chars as
+    # "nothing meaningful to filter on" and deliberately return the WHOLE catalog unfiltered
+    # (reasonable for a bare discovery browse — "show me what you have" shouldn't return
+    # zero results). But this same search is also how a bare/short cart reference term
+    # ("ok go for it" -> "go it" after stopword-cleaning, or a lone size letter like "L")
+    # gets resolved — and a real, confirmed live bug proved that "the whole catalog" is
+    # exactly wrong there: it defeats the `if not products` fallback below (a genuinely
+    # unmatched term should fall back to the single last-shown/pending-variant product, not
+    # surface an unrelated grab-bag of the first few catalog products as "ambiguous"). Skip
+    # the call entirely when the term itself carries no real search signal, using the same
+    # length-2 threshold each adapter already applies internally.
+    has_meaningful_token = any(len(t) > 2 for t in term.split())
+    products = adapter.search_products(query=term) if has_meaningful_token else []
     if not products:
         # A pronoun combined with a variant descriptor ("add me one in size M") can leave
         # nothing but filler/quantity/variant words after stopword-cleaning ("one size m") —

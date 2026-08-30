@@ -301,12 +301,17 @@ def test_auto_navigate_target_does_not_linger_into_an_unrelated_later_turn(
 def test_ambiguous_get_product_details_reply_is_never_handed_to_phrase_reply(
     adapter: MockAdapter, session_store: SessionStore
 ) -> None:
+    # Two real, meaningful tokens ("shirt", "jacket") each keyword-match a DIFFERENT one of
+    # MockAdapter's two products — genuinely ambiguous, unlike an empty/too-short term (which
+    # a real bug used to let fall through to "browse the whole catalog" instead of the
+    # intended "nothing meaningful to search on" — see agent/intents.py's
+    # _resolve_single_product and its regression tests in test_us2_cart.py).
     scripted = _LyingScriptedLLMClient(
-        ActionCall(action_type="get_product_details", parameters={"raw_text": "what do you have"})
+        ActionCall(action_type="get_product_details", parameters={"raw_text": "shirt jacket"})
     )
     ctx = _ctx(adapter, scripted, session_store)
 
-    reply = handle_turn(ctx, "s17", "what do you have")
+    reply = handle_turn(ctx, "s17", "shirt jacket")
 
     assert reply != "Got it — here's the exact item you asked about."
     assert "did you mean" in reply.lower()
