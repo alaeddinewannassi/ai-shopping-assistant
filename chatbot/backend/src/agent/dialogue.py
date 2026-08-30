@@ -8,6 +8,7 @@ path allowed to mutate the cart, research.md §9.3).
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 
@@ -41,6 +42,13 @@ from src.logging.audit import log_action, log_turn_completed
 from src.promo import engine as promo_engine
 from src.promo.strategy import PromoStrategyRule
 from src.session.store import ConversationSession, SessionStore
+
+# Same logger name as src/agent/intents.py's — the shopper-facing "can't reach the store"
+# replies below are deliberately generic (a real customer during a real outage shouldn't
+# see internal config guidance); the adapter's actual exception message, which distinguishes
+# "never configured" from "temporarily unreachable," goes here and into log_action's
+# `details` instead, for whoever operates the store.
+_logger = logging.getLogger("assistant.adapter")
 
 
 @dataclass
@@ -193,8 +201,8 @@ def _handle_propose_cart_line_change(
     action_type = "propose_remove_from_cart" if remove else "propose_update_cart"
     try:
         cart = ctx.adapter.get_cart(_cart_id_for(session))
-    except AdapterUnavailableError:
-        log_action(session_id, action_type, "get_cart", "unavailable")
+    except AdapterUnavailableError as exc:
+        log_action(session_id, action_type, "get_cart", "unavailable", details={"error": str(exc)[:500]})
         return (
             "I can't reach your cart right now, so I can't verify that change. "
             "Please try again in a moment."
@@ -213,8 +221,8 @@ def _handle_propose_cart_line_change(
     line = resolution.line
     try:
         product = ctx.adapter.get_product(line.product_id)
-    except AdapterUnavailableError:
-        log_action(session_id, action_type, "get_product", "unavailable")
+    except AdapterUnavailableError as exc:
+        log_action(session_id, action_type, "get_product", "unavailable", details={"error": str(exc)[:500]})
         return "I can't reach the store's catalog right now to verify that item. Please try again in a moment."
 
     if remove:
@@ -248,8 +256,8 @@ def _handle_request_checkout(ctx: DialogueContext, session_id: str) -> str:
     session = ctx.session_store.get_or_create(session_id)
     try:
         cart = ctx.adapter.get_cart(_cart_id_for(session))
-    except AdapterUnavailableError:
-        log_action(session_id, "request_checkout", "get_cart", "unavailable")
+    except AdapterUnavailableError as exc:
+        log_action(session_id, "request_checkout", "get_cart", "unavailable", details={"error": str(exc)[:500]})
         return (
             "I can't reach the store right now, so I can't start checkout. "
             "Please try again in a moment."
@@ -273,8 +281,8 @@ def _handle_checkout_state_changed(ctx: DialogueContext, session_id: str) -> str
     session = ctx.session_store.get_or_create(session_id)
     try:
         cart = ctx.adapter.get_cart(_cart_id_for(session))
-    except AdapterUnavailableError:
-        log_action(session_id, "confirm_pending_action", "checkout", "unavailable")
+    except AdapterUnavailableError as exc:
+        log_action(session_id, "confirm_pending_action", "checkout", "unavailable", details={"error": str(exc)[:500]})
         return "I can't reach the store right now to re-check your cart. Please try again shortly."
 
     if not cart.lines:
@@ -338,8 +346,8 @@ def _describe_available_promos(ctx: DialogueContext, session_id: str, session: C
     inventing one, when the shopper asks about promos without giving a specific code."""
     try:
         cart = ctx.adapter.get_cart(_cart_id_for(session))
-    except AdapterUnavailableError:
-        log_action(session_id, "apply_promo", "get_cart", "unavailable")
+    except AdapterUnavailableError as exc:
+        log_action(session_id, "apply_promo", "get_cart", "unavailable", details={"error": str(exc)[:500]})
         return "I can't reach the store right now to check for promo codes. Please try again in a moment."
 
     if ctx.promo_rules and cart.lines and not cart.applied_promo_code:
@@ -347,7 +355,8 @@ def _describe_available_promos(ctx: DialogueContext, session_id: str, session: C
         for suggestion in promo_engine.evaluate(cart, session_context, ctx.promo_rules):
             try:
                 validation = ctx.adapter.validate_promo(_cart_id_for(session), suggestion.code)
-            except AdapterUnavailableError:
+            except AdapterUnavailableError as exc:
+                _logger.warning("Adapter unavailable during promo check for %s: %s", session_id, exc)
                 break
             if validation.valid:
                 assert ctx.pending_gate is not None
@@ -379,7 +388,8 @@ def _maybe_suggest_promo(ctx: DialogueContext, session_id: str, reply: str) -> s
         return reply
     try:
         cart = ctx.adapter.get_cart(_cart_id_for(session))
-    except AdapterUnavailableError:
+    except AdapterUnavailableError as exc:
+        _logger.warning("Adapter unavailable during proactive promo suggestion for %s: %s", session_id, exc)
         return reply
     if not cart.lines or cart.applied_promo_code:
         return reply
@@ -388,7 +398,8 @@ def _maybe_suggest_promo(ctx: DialogueContext, session_id: str, reply: str) -> s
     for suggestion in promo_engine.evaluate(cart, session_context, ctx.promo_rules):
         try:
             validation = ctx.adapter.validate_promo(_cart_id_for(session), suggestion.code)
-        except AdapterUnavailableError:
+        except AdapterUnavailableError as exc:
+            _logger.warning("Adapter unavailable during proactive promo suggestion for %s: %s", session_id, exc)
             return reply
         if not validation.valid:
             continue
@@ -418,9 +429,9 @@ def _handle_confirm(ctx: DialogueContext, session_id: str) -> str:
     except PendingActionError:
         log_action(session_id, "confirm_pending_action", "confirm", "stale_or_missing")
         return "That confirmation isn't valid anymore — could you tell me again what you'd like to do?"
-    except AdapterUnavailableError:
+    except AdapterUnavailableError as exc:
         # T035a: never assume success, never fall back to a cache for a mutation.
-        log_action(session_id, "confirm_pending_action", "confirm", "unavailable")
+        log_action(session_id, "confirm_pending_action", "confirm", "unavailable", details={"error": str(exc)[:500]})
         return (
             "I couldn't apply that change — the store is temporarily unreachable. "
             "Nothing was changed; please try again shortly."

@@ -9,6 +9,7 @@ the live adapter is unreachable (FR-016, research.md §8), never fabricating pro
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -26,6 +27,19 @@ from src.adapters.base import (
 )
 from src.agent.taxonomy_resolver import Candidate, ResolutionStatus, TaxonomyResolver
 from src.session.catalog_cache import CatalogSnapshotCache
+
+# The shopper-facing "can't reach the store's catalog" reply (dialogue.py) is deliberately
+# generic — a real customer during a real outage should never see internal config guidance.
+# This logger is where that detail actually goes, for whoever is operating the store: the
+# adapter's own exception message distinguishes "never configured" (e.g. missing/invalid
+# webservice key) from "temporarily unreachable" (e.g. timeout) far better than the
+# generic AdapterUnavailableError type alone does.
+_logger = logging.getLogger("assistant.adapter")
+
+
+def _log_unavailable(where: str, exc: Exception) -> None:
+    _logger.warning("Adapter unavailable during %s: %s", where, exc)
+
 
 _PRICE_PATTERN = re.compile(r"under\s+\$?(\d+(?:\.\d+)?)|below\s+\$?(\d+(?:\.\d+)?)", re.I)
 _NAVIGATION_PATTERN = re.compile(
@@ -118,10 +132,11 @@ class DiscoveryIntentHandler:
         if term:
             try:
                 category_result = self._resolver.resolve_category(term)
-            except AdapterUnavailableError:
+            except AdapterUnavailableError as exc:
                 # TaxonomyResolver needed a fresh snapshot (none cached yet) and the store
                 # is unreachable — fall back the same way a failed live search would
                 # (research.md §8/§9.2), never silently proceeding with a guessed filter.
+                _log_unavailable(f"search:{term}", exc)
                 return self._degraded_or_unavailable(f"search:{term}:{max_price}")
         if category_result is not None and category_result.status == ResolutionStatus.AMBIGUOUS:
             return DiscoveryOutcome(
@@ -142,7 +157,8 @@ class DiscoveryIntentHandler:
 
         try:
             category_result = self._resolver.resolve_category(term)
-        except AdapterUnavailableError:
+        except AdapterUnavailableError as exc:
+            _log_unavailable(f"navigate:{term}", exc)
             return self._degraded_or_unavailable(f"nav:{term}")
         if category_result.status == ResolutionStatus.AMBIGUOUS:
             return DiscoveryOutcome(
@@ -156,7 +172,8 @@ class DiscoveryIntentHandler:
                 products = self._adapter.search_products(
                     filters={"category_id": category_result.resolved_id}
                 )
-            except AdapterUnavailableError:
+            except AdapterUnavailableError as exc:
+                _log_unavailable(f"navigate:{term}", exc)
                 return self._degraded_or_unavailable(f"nav:{term}")
             self._cache.put(f"nav:{term}", [asdict(p) for p in products])
             return DiscoveryOutcome(
@@ -171,7 +188,8 @@ class DiscoveryIntentHandler:
     def _run_search(self, *, cache_key: str, query: str, filters: dict) -> DiscoveryOutcome:
         try:
             products = self._adapter.search_products(query=query, filters=filters)
-        except AdapterUnavailableError:
+        except AdapterUnavailableError as exc:
+            _log_unavailable(cache_key, exc)
             return self._degraded_or_unavailable(cache_key)
 
         self._cache.put(cache_key, [asdict(p) for p in products])
@@ -256,7 +274,8 @@ class CartIntentHandler:
 
         try:
             products = self._adapter.search_products(query=term)
-        except AdapterUnavailableError:
+        except AdapterUnavailableError as exc:
+            _log_unavailable(f"add_to_cart:{term}", exc)
             return CartResolution(kind=CartResolutionKind.UNAVAILABLE)
 
         if not products:
@@ -299,7 +318,8 @@ class CartIntentHandler:
         for line in cart.lines:
             try:
                 product = self._adapter.get_product(line.product_id)
-            except AdapterUnavailableError:
+            except AdapterUnavailableError as exc:
+                _log_unavailable(f"cart_line_reference:{line.product_id}", exc)
                 return CartResolution(kind=CartResolutionKind.UNAVAILABLE)
             except ProductNotFoundError:
                 continue
@@ -388,7 +408,8 @@ class PromoIntentHandler:
         code = match.group(1).upper()
         try:
             validation = self._adapter.validate_promo(cart_id, code)
-        except AdapterUnavailableError:
+        except AdapterUnavailableError as exc:
+            _log_unavailable(f"apply_promo:{code}", exc)
             return PromoResolution(kind=PromoResolutionKind.UNAVAILABLE)
 
         if not validation.valid:
