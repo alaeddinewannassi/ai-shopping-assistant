@@ -219,6 +219,10 @@ export class AssistantChatWidget extends HTMLElement {
     if (open) {
       this.setAttribute("open", "");
       this.inputEl.focus();
+      // Restored/appended messages scroll-to-bottom while the panel is still `display:
+      // none` (closed) — a hidden element reports scrollHeight 0, so that scroll silently
+      // no-ops. Now that the panel is actually laid out, scroll to the real bottom.
+      this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
     } else {
       this.removeAttribute("open");
     }
