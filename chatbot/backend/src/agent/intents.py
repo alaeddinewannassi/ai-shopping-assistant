@@ -53,6 +53,8 @@ _STOPWORDS = {
     # word like "available" gets treated as a real search keyword and matched (or not)
     "what", "are", "is", "available", "have", "has", "got", "all", "everything", "your",
     "you", "do", "does", "sell", "carry", "stock", "offer",
+    # Common acknowledgment fillers ("ok add me one...") — not identifying words either.
+    "ok", "okay", "sure", "yeah", "yep", "alright",
 }
 
 
@@ -225,20 +227,6 @@ class DiscoveryIntentHandler:
             _log_unavailable(f"product_details:{raw_text}", exc)
             return DiscoveryOutcome(kind=DiscoveryKind.UNAVAILABLE)
 
-        if product is None and not candidates and last_shown_ids and len(last_shown_ids) == 1:
-            # A pure attribute question ("what sizes do you have") often has no keyword of
-            # its own that matches the product's name at all — "sizes"/"colors"/"stock" isn't
-            # part of any product name, so the keyword search above genuinely finds nothing.
-            # With exactly one product just shown, that's still almost certainly what this is
-            # about (the LLM is only meant to call this tool for an already-shown/named item).
-            try:
-                product = self._adapter.get_product(last_shown_ids[0])
-            except AdapterUnavailableError as exc:
-                _log_unavailable(f"product_details:fallback:{last_shown_ids[0]}", exc)
-                return DiscoveryOutcome(kind=DiscoveryKind.UNAVAILABLE)
-            except ProductNotFoundError:
-                pass
-
         if product is None:
             if candidates:
                 return DiscoveryOutcome(
@@ -332,6 +320,17 @@ def _resolve_single_product(
     term = _clean_reference_term(raw_text)
     products = adapter.search_products(query=term)
     if not products:
+        # A pronoun combined with a variant descriptor ("add me one in size M") can leave
+        # nothing but filler/quantity/variant words after stopword-cleaning ("one size m") —
+        # none of which match any product name, so the keyword search above genuinely finds
+        # nothing. With exactly one product just shown, that's still almost certainly what's
+        # meant; a wrong guess here proposes the wrong item by name and the shopper declines
+        # it (Constitution Principle III's confirm-gate), it never silently mutates anything.
+        if last_shown_ids and len(last_shown_ids) == 1:
+            try:
+                return adapter.get_product(last_shown_ids[0]), []
+            except ProductNotFoundError:
+                pass
         return None, []
     if len(products) > 1:
         strict_tokens = [t for t in term.lower().split() if len(t) > 2]

@@ -259,3 +259,20 @@ def test_add_the_first_one_resolves_by_ordinal(
 
     assert "couldn't find a product" not in reply.lower()
     assert "Blue Jacket" in reply
+
+
+def test_add_pronoun_with_variant_descriptor_resolves_against_the_single_last_shown_product(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    """Regression test for a real bug: "ok add me one in size M" left nothing but filler/
+    quantity/variant words after stopword-cleaning ("one size m") — not an exact bare-pronoun
+    match, and none of those words match any product name — producing a false NOT_FOUND even
+    though exactly one product (Blue Jacket) had just been shown and was clearly what "one"
+    referred to."""
+    ctx = _ctx(adapter, llm_client, session_store)
+    handle_turn(ctx, "u14", "show me jackets")
+
+    reply = handle_turn(ctx, "u14", "ok add me one in size M")
+
+    assert "couldn't find a product" not in reply.lower()
+    assert "Blue Jacket" in reply
