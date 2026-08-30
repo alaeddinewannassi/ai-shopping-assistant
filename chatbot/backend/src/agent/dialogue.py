@@ -507,6 +507,14 @@ def _handle_confirm(ctx: DialogueContext, session_id: str) -> tuple[str, str | N
     if pending.action_type == "checkout":
         assert result.order is not None
         order = result.order
+        # Re-fetch fresh rather than reusing the STALE `session` read at the top of this
+        # function — ctx.pending_gate.confirm() above already independently cleared
+        # pending_action (its own get_or_create()+save() round trip, in its `finally`). Saving
+        # the stale object here would silently resurrect that already-spent PendingAction,
+        # confirmed=False again — a stray later "yes" could then re-trigger and re-execute the
+        # SAME checkout/mutation (research.md §9.4's "a stray later 'yes' must never confirm a
+        # stale, no-longer-relevant proposal" — this was a real gap in that guarantee).
+        session = ctx.session_store.get_or_create(session_id)
         session.has_completed_order = True
         ctx.session_store.save(session)
         return (
@@ -772,6 +780,19 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
     else:
         final_reply = _maybe_suggest_promo(ctx, session_id, reply)
 
+    # Re-read the freshest state right before this final save — several branches above
+    # (_handle_propose_add_to_cart, PendingActionGate.propose/confirm/decline,
+    # _handle_request_checkout, _handle_apply_promo, _maybe_suggest_promo, ...) do their own
+    # independent get_or_create()+save() round trips on this SAME session_id. Against Redis,
+    # every get_or_create() deserializes a BRAND NEW object from whatever's currently stored —
+    # unlike the in-memory test double, which hands back one shared object reference and so
+    # never surfaces this. Saving the STALE `session` object loaded at the top of this
+    # function (before any of that happened) would silently overwrite everything those nested
+    # calls just committed — a real, confirmed live bug: a just-created pending_action was
+    # wiped out immediately after creation, so the shopper's very next "yes" always found
+    # "nothing pending" to confirm. Re-fetching here picks their commits up before layering
+    # this turn's own last_turn_* fields on top of them.
+    session = ctx.session_store.get_or_create(session_id)
     # Reset every turn (never accumulates stale links from an earlier, unrelated turn) —
     # api/chat.py reads these right after handle_turn returns to build real, clickable
     # product/cart links (window.location.origin + these ids, computed client-side — see

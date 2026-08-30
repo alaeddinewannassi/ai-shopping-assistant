@@ -7,6 +7,8 @@ DialogueContext, the same wiring api/chat.py uses, backed by MockAdapter + Pendi
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 
 from src.adapters.mock import MockAdapter
@@ -52,6 +54,22 @@ def _ctx(adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: S
 def _add_and_confirm(ctx: DialogueContext, session_id: str, text: str) -> None:
     handle_turn(ctx, session_id, text)
     handle_turn(ctx, session_id, "yes")
+
+
+class _NonAliasingSessionStore(SessionStore):
+    """SessionStore(redis_url=None) hands back the SAME ConversationSession object reference
+    on every get_or_create() call for a given session_id, so two "independent" reads within
+    one turn are actually aliases of one mutable object — real Redis deserializes a brand-new
+    object on every read instead. That difference hid a real, confirmed bug: PendingActionGate
+    .confirm() clears pending_action via its own independent read/write, but a handler that had
+    already read the (now-stale) session earlier in the same call could still save it back
+    afterward — silently resurrecting the just-spent PendingAction, confirmed=False again, so
+    a stray later "yes" could re-trigger the SAME mutation a second time. Deep-copying on every
+    read reproduces Redis's actual behavior without requiring a real Redis instance in tests."""
+
+    def _read(self, session_id: str):
+        session = self._memory.get(session_id)
+        return copy.deepcopy(session) if session is not None else None
 
 
 # -- Scenario 1: checkout request produces full recap + asks for confirmation -- #
@@ -173,3 +191,34 @@ def test_checkout_with_empty_cart_offers_to_resume_discovery_without_recap(
     assert "total" not in reply.lower()  # no recap was shown
     session = session_store.get_or_create("c5")
     assert session.pending_action is None
+
+
+# -- Session-write-clobber regression: a stray "yes" after checkout must never re-trigger -- #
+
+
+def test_stray_confirm_after_checkout_does_not_re_place_the_order(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient
+) -> None:
+    """Regression test for a real bug found while investigating a live-reported "nothing
+    pending" defect elsewhere in this same session-persistence pattern: `_handle_confirm`
+    read `session` BEFORE calling `ctx.pending_gate.confirm()`, which independently clears
+    pending_action as part of executing the checkout — then, on the checkout branch only,
+    saved that now-stale `session` object again (just to set has_completed_order), silently
+    resurrecting the already-spent, un-cleared PendingAction. Against a store where every
+    get_or_create() returns a fresh object (real Redis; simulated here without needing one),
+    a second, stray "yes" could then re-confirm and re-execute the SAME checkout — an actual
+    double order — instead of correctly finding nothing pending."""
+    session_store = _NonAliasingSessionStore(redis_url=None)
+    ctx = _ctx(adapter, llm_client, session_store)
+    _add_and_confirm(ctx, "c6", "add the red classic t-shirt to my cart")
+    handle_turn(ctx, "c6", "checkout")
+    handle_turn(ctx, "c6", "yes")
+    assert len(adapter._orders) == 1
+
+    stray_reply = handle_turn(ctx, "c6", "yes")
+
+    assert len(adapter._orders) == 1  # not re-placed
+    assert "nothing pending" in stray_reply.lower()
+    session = session_store.get_or_create("c6")
+    assert session.pending_action is None
+    assert session.has_completed_order is True

@@ -6,6 +6,8 @@ DialogueContext, the same wiring api/chat.py uses, backed by MockAdapter + Pendi
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 
 from src.adapters.mock import MockAdapter
@@ -16,6 +18,22 @@ from src.agent.pending import PendingActionGate
 from src.agent.taxonomy_resolver import TaxonomyResolver
 from src.session.catalog_cache import CatalogSnapshotCache
 from src.session.store import SessionStore
+
+
+class _NonAliasingSessionStore(SessionStore):
+    """The base in-memory fallback (SessionStore(redis_url=None)) hands back the SAME
+    ConversationSession object reference on every get_or_create() call for a given
+    session_id — so two "independent" reads within one turn are actually aliases of one
+    mutable object, and a write through either name is visible through the other. Real Redis
+    does not work that way: every get_or_create() deserializes a BRAND NEW object from
+    whatever's currently stored. That difference hid a real, confirmed live bug (a nested
+    handler's just-committed pending_action got silently wiped by a later, stale full-session
+    save elsewhere in the same turn) from the entire test suite. This subclass deep-copies on
+    every read so tests can catch that class of bug without needing a real Redis instance."""
+
+    def _read(self, session_id: str):
+        session = self._memory.get(session_id)
+        return copy.deepcopy(session) if session is not None else None
 
 
 @pytest.fixture
@@ -351,3 +369,44 @@ def test_bare_variant_answer_resolves_against_the_product_still_being_asked_abou
     cart = adapter.get_cart("u16")
     assert len(cart.lines) == 1
     assert cart.lines[0].variant_id == "var-tshirt-1-red-m"
+
+
+# -- Session-write-clobber regression: a second propose mid-conversation must not silently -- #
+# -- wipe itself out before the shopper can confirm it -------------------------------------- #
+
+
+def test_second_propose_survives_to_be_confirmed_against_a_non_aliasing_session_store(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient
+) -> None:
+    """Regression test for a real, confirmed live bug reported from an actual deployed
+    session: a shopper proposed adding an item, then (before confirming) proposed adding it
+    again with a different quantity — the second recap was shown correctly, but the
+    following "yes" replied "There's nothing pending for me to confirm right now." and the
+    cart stayed empty.
+
+    Root cause: `_route_turn` reads the session ONCE at the top of the turn, but several
+    handlers it calls (`_handle_propose_add_to_cart` -> `PendingActionGate.propose` ->
+    `SessionStore.propose_action`) do their OWN independent get_or_create()+save() round
+    trips on the same session_id. Against real Redis, every get_or_create() deserializes a
+    brand-new object — so `_route_turn`'s final, unconditional save of its now-stale
+    top-of-turn snapshot silently wiped out the pending_action a nested call had just
+    committed, moments earlier, in the very same turn.
+
+    `SessionStore(redis_url=None)` (used by every other test in this suite) hides this
+    entirely — its in-memory fallback hands back the SAME object reference on every read, so
+    two "independent" reads are actually aliases of one mutable object and nothing is ever
+    lost. `_NonAliasingSessionStore` (this file) deep-copies on every read specifically to
+    catch this class of bug without requiring a real Redis instance."""
+    session_store = _NonAliasingSessionStore(redis_url=None)
+    ctx = _ctx(adapter, llm_client, session_store)
+
+    handle_turn(ctx, "u17", "add the red classic t-shirt to my cart")
+    second_reply = handle_turn(ctx, "u17", "add 2 red classic t-shirts to my cart")
+    assert "2 x Classic T-Shirt" in second_reply
+
+    confirm_reply = handle_turn(ctx, "u17", "yes")
+
+    assert "nothing pending" not in confirm_reply.lower()
+    cart = adapter.get_cart("u17")
+    assert len(cart.lines) == 1
+    assert cart.lines[0].quantity == 2  # the SECOND propose, not a stale/wiped first one
