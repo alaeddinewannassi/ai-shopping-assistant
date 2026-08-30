@@ -10,7 +10,7 @@ import pytest
 
 from src.adapters.mock import MockAdapter
 from src.agent.dialogue import DialogueContext, handle_turn
-from src.agent.intents import CartIntentHandler, DiscoveryIntentHandler
+from src.agent.intents import CartIntentHandler, CartResolutionKind, DiscoveryIntentHandler
 from src.agent.llm_client import RuleBasedStubClient
 from src.agent.pending import PendingActionGate
 from src.agent.taxonomy_resolver import TaxonomyResolver
@@ -279,6 +279,25 @@ def test_add_pronoun_with_variant_descriptor_resolves_against_the_single_last_sh
 
     assert "couldn't find a product" not in reply.lower()
     assert "Blue Jacket" in reply
+
+
+def test_hyphenless_product_name_correctly_narrows_to_one_match(adapter: MockAdapter) -> None:
+    """Regression test for a real bug: "add the tshirt not the jacket" correctly found the
+    t-shirt in the initial broad search (fold-matching handles "tshirt" vs "t-shirt"), but
+    the AND-narrowing step used a naive literal substring check ("tshirt" in
+    "classic t-shirt" is False — the hyphen makes them different strings) instead of the
+    same matching, so it never actually narrowed down and stayed stuck "ambiguous" — even
+    though only one candidate ever matched both tokens in the first place. Calls
+    CartIntentHandler directly (bypassing intent classification) to isolate the resolution
+    logic under test — RuleBasedStubClient's regex matcher can't infer "add" intent from
+    context the way a real LLM does, that's a separate concern from this fix."""
+    handler = CartIntentHandler(adapter)
+
+    resolution = handler.resolve_add_to_cart("add the tshirt not the jacket")
+
+    assert resolution.kind == CartResolutionKind.AMBIGUOUS_VARIANT
+    assert resolution.product is not None
+    assert resolution.product.name == "Classic T-Shirt"
 
 
 def test_cart_action_marks_the_turn_as_cart_link_worthy(

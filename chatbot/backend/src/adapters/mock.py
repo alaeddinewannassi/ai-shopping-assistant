@@ -25,6 +25,7 @@ from src.adapters.base import (
     PromoValidation,
     Variant,
 )
+from src.adapters.matching import token_matches_name
 
 
 @dataclass
@@ -150,19 +151,9 @@ class MockAdapter:
             }
             query_tokens -= stopwords
             if query_tokens:
-                def _fold(word: str) -> str:
-                    return word[:-1] if word.endswith("s") and len(word) > 3 else word
-
-                folded_tokens = {_fold(t) for t in query_tokens}
                 results = [
-                    p
-                    for p in results
-                    if any(
-                        _fold(t) in name_token or name_token in _fold(t)
-                        for t in folded_tokens
-                        for name_token in p.name.lower().replace("-", " ").split()
-                        if len(name_token) > 2  # avoid short tokens ("t") matching everything
-                    )
+                    p for p in results
+                    if any(token_matches_name(t, p.name) for t in query_tokens)
                 ]
             else:
                 # Query was entirely stopwords/too short to extract keywords from — treat

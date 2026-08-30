@@ -25,6 +25,7 @@ from src.adapters.base import (
     PromoValidation,
     Variant,
 )
+from src.adapters.matching import token_matches_name
 from src.agent.taxonomy_resolver import Candidate, ResolutionStatus, TaxonomyResolver
 from src.session.catalog_cache import CatalogSnapshotCache
 
@@ -333,9 +334,33 @@ def _resolve_single_product(
                 pass
         return None, []
     if len(products) > 1:
-        strict_tokens = [t for t in term.lower().split() if len(t) > 2]
-        if strict_tokens:
-            narrowed = [p for p in products if all(t in p.name.lower() for t in strict_tokens)]
+        # "I want the tshirt not the jacket" — "not" itself correctly matches no product
+        # (token_matches_name, not a loose substring check — "not" is deliberately never a
+        # false match for "notebook" anymore). But requiring EVERY token to match, "not"
+        # included, then means NOTHING can ever satisfy all of them: "not" needs to exclude
+        # whatever follows it, not need its own product-name match. Split on it: words
+        # before "not" must all match (the AND-narrowing below); words after it must match
+        # NONE of a candidate (an explicit exclusion), so "the jacket" actually rules out
+        # Blue Jacket instead of just failing to positively identify anything.
+        term_lower = f" {term.lower()} "
+        if " not " in term_lower:
+            positive_part, _, negative_part = term_lower.partition(" not ")
+        else:
+            positive_part, negative_part = term_lower, ""
+        positive_tokens = [t for t in positive_part.split() if len(t) > 2]
+        negative_tokens = [t for t in negative_part.split() if len(t) > 2]
+        if positive_tokens or negative_tokens:
+            # token_matches_name — the SAME matching the initial broad search above already
+            # used — not a naive substring check: "tshirt" (no hyphen) legitimately matches
+            # a catalog name spelled "t-shirt", but a naive `"tshirt" in name.lower()` check
+            # missed that (the hyphen makes them different strings), so this narrowing step
+            # failed to narrow even when the broad search above had already found the exact
+            # right product — leaving it stuck "ambiguous" against unrelated candidates.
+            narrowed = [
+                p for p in products
+                if all(token_matches_name(t, p.name) for t in positive_tokens)
+                and not any(token_matches_name(t, p.name) for t in negative_tokens)
+            ]
             if len(narrowed) == 1:
                 products = narrowed
     if len(products) > 1:
