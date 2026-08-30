@@ -104,6 +104,124 @@ def test_missing_env_raises_value_error(monkeypatch) -> None:
         raise AssertionError("expected ValueError when PrestaShop env vars are unset")
 
 
+# -- specific_price discount resolution (_apply_specific_price) ----------------------- #
+#
+# Regression coverage for a real bug found via live testing: the storefront showed an
+# active, store-wide 20% reduction (€23.90 -> €19.12) that the chatbot's own price quotes
+# and cart totals completely ignored, always using the undiscounted catalog `price` field.
+
+
+def _adapter() -> PrestaShopAdapter:
+    return PrestaShopAdapter(base_url="http://prestashop.test/api", api_key="fake-key")
+
+
+def test_apply_specific_price_applies_an_unscoped_active_percentage_reduction() -> None:
+    rows = [{
+        "id_product_attribute": "0", "id_shop": "0", "id_shop_group": "0", "id_currency": "0",
+        "id_country": "0", "id_group": "0", "id_customer": "0", "from_quantity": "1",
+        "price": "-1.000000", "reduction": "0.200000", "reduction_type": "percentage",
+        "from": "0000-00-00 00:00:00", "to": "0000-00-00 00:00:00",
+    }]
+    assert _adapter()._apply_specific_price(23.90, rows) == 19.12
+
+
+def test_apply_specific_price_applies_a_fixed_override_price() -> None:
+    rows = [{
+        "id_product_attribute": "0", "id_shop": "0", "id_shop_group": "0", "id_currency": "0",
+        "id_country": "0", "id_group": "0", "id_customer": "0", "from_quantity": "1",
+        "price": "9.990000", "reduction": "0", "reduction_type": "amount",
+        "from": "0000-00-00 00:00:00", "to": "0000-00-00 00:00:00",
+    }]
+    assert _adapter()._apply_specific_price(23.90, rows) == 9.99
+
+
+def test_apply_specific_price_skips_a_customer_scoped_rule() -> None:
+    rows = [{
+        "id_product_attribute": "0", "id_shop": "0", "id_shop_group": "0", "id_currency": "0",
+        "id_country": "0", "id_group": "0", "id_customer": "5", "from_quantity": "1",
+        "price": "-1.000000", "reduction": "0.500000", "reduction_type": "percentage",
+        "from": "0000-00-00 00:00:00", "to": "0000-00-00 00:00:00",
+    }]
+    assert _adapter()._apply_specific_price(23.90, rows) == 23.90
+
+
+def test_apply_specific_price_skips_an_expired_rule() -> None:
+    rows = [{
+        "id_product_attribute": "0", "id_shop": "0", "id_shop_group": "0", "id_currency": "0",
+        "id_country": "0", "id_group": "0", "id_customer": "0", "from_quantity": "1",
+        "price": "-1.000000", "reduction": "0.500000", "reduction_type": "percentage",
+        "from": "0000-00-00 00:00:00", "to": "2000-01-01 00:00:00",
+    }]
+    assert _adapter()._apply_specific_price(23.90, rows) == 23.90
+
+
+def test_apply_specific_price_skips_a_bulk_only_rule() -> None:
+    rows = [{
+        "id_product_attribute": "0", "id_shop": "0", "id_shop_group": "0", "id_currency": "0",
+        "id_country": "0", "id_group": "0", "id_customer": "0", "from_quantity": "10",
+        "price": "-1.000000", "reduction": "0.500000", "reduction_type": "percentage",
+        "from": "0000-00-00 00:00:00", "to": "0000-00-00 00:00:00",
+    }]
+    assert _adapter()._apply_specific_price(23.90, rows) == 23.90
+
+
+def test_apply_specific_price_picks_the_lowest_of_several_applicable_rules() -> None:
+    common = {
+        "id_product_attribute": "0", "id_shop": "0", "id_shop_group": "0", "id_currency": "0",
+        "id_country": "0", "id_group": "0", "id_customer": "0", "from_quantity": "1",
+        "from": "0000-00-00 00:00:00", "to": "0000-00-00 00:00:00",
+    }
+    rows = [
+        {**common, "price": "-1.000000", "reduction": "0.100000", "reduction_type": "percentage"},
+        {**common, "price": "-1.000000", "reduction": "0.300000", "reduction_type": "percentage"},
+    ]
+    assert _adapter()._apply_specific_price(20.00, rows) == 14.00
+
+
+def test_apply_specific_price_no_rows_returns_price_unchanged() -> None:
+    assert _adapter()._apply_specific_price(23.90, []) == 23.90
+
+
+# -- get_product's display=full response-shape quirk ----------------------------------- #
+
+
+def test_get_product_handles_the_plural_wrapped_display_full_response() -> None:
+    """Regression test for a real bug introduced (and caught before deploy) alongside the
+    specific_price work above: PrestaShop's single-resource GET (/api/products/{id}) returns
+    {"product": {...}} normally, but switches to {"products": [{...}]} — PLURAL, wrapped in a
+    one-item list — once display=full is added to the request (needed for description/
+    description_short, which aren't in the default field set). get_product's parsing must
+    handle that shape, not just the singular one, or every field silently comes back empty/
+    zero instead of raising or fetching real data."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/products/1":
+            return httpx.Response(200, json={"products": [{
+                "id": "1",
+                "name": "Classic T-Shirt",
+                "price": "19.99",
+                "id_category_default": "2",
+                "description_short": "A soft cotton tee.",
+            }]})
+        if path == "/api/combinations":
+            return httpx.Response(200, json={})
+        if path == "/api/specific_prices":
+            return httpx.Response(200, json={})
+        if path == "/api/stock_availables":
+            return httpx.Response(200, json={"stock_availables": {"quantity": "7"}})
+        raise AssertionError(f"unexpected request: {path}")
+
+    adapter = _adapter_with_mock_transport(handler)
+
+    product = adapter.get_product("1")
+
+    assert product.name == "Classic T-Shirt"
+    assert product.base_price == 19.99
+    assert product.description == "A soft cotton tee."
+    assert len(product.variants) == 1
+    assert product.variants[0].stock_quantity == 7
+
+
 # -- Real-shopper identity resolution (set_customer_context) -------------------------- #
 
 

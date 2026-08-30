@@ -303,12 +303,18 @@ class PrestaShopAdapter:
 
     def get_product(self, product_id: str) -> Product:
         # display=full — PrestaShop's default field set omits description/description_short
-        # (large, optional text), same as search_products' own listing fetch above.
+        # (large, optional text), same as search_products' own listing fetch above. Real API
+        # quirk: display=full on a single-resource GET switches the response's top-level key
+        # from singular "product": {...} to PLURAL "products": [{...}] (a one-item list) —
+        # the same shape search_products already gets for its listing fetch. _as_list
+        # normalizes either shape uniformly instead of assuming the singular key still works.
         data = self._get(f"/api/products/{_as_int(product_id)}", {"display": "full"})
         if data is None:
             raise ProductNotFoundError(f"No such product: {product_id}")
-        raw = data.get("product", data)
-        return self._map_product(raw)
+        rows = self._as_list(data, "products", "product")
+        if not rows:
+            raise ProductNotFoundError(f"No such product: {product_id}")
+        return self._map_product(rows[0])
 
     def list_categories(self) -> list[Category]:
         data = self._get("/api/categories", {"display": "full", "filter[active]": "1"})
@@ -687,6 +693,7 @@ class PrestaShopAdapter:
 
     def _map_product(self, raw: dict) -> Product:
         product_id = _as_int(raw.get("id"))
+        raw_price = _as_float(raw.get("price"))
         # description_short is the store's own front-end blurb (e.g. what's shown right
         # under the price on the product page) — prefer it, falling back to the full
         # description when a product has no short one, over showing nothing at all.
@@ -694,23 +701,32 @@ class PrestaShopAdapter:
             _localized(raw.get("description_short"), self._lang_id)
             or _localized(raw.get("description"), self._lang_id)
         )
+        specific_price_rows = self._specific_price_rows(product_id)
         return Product(
             id=str(product_id),
             name=_localized(raw.get("name"), self._lang_id),
             category_id=str(raw.get("id_category_default", "")),
-            base_price=_as_float(raw.get("price")),
-            variants=self._load_variants(product_id, _as_float(raw.get("price"))),
+            base_price=self._apply_specific_price(raw_price, specific_price_rows),
+            variants=self._load_variants(product_id, raw_price, specific_price_rows),
             description=description,
         )
 
-    def _load_variants(self, product_id: int, base_price: float) -> list[Variant]:
+    def _load_variants(
+        self, product_id: int, base_price: float, specific_price_rows: list[dict] | None = None
+    ) -> list[Variant]:
+        # base_price here is the RAW, undiscounted catalog price (_map_product passes it
+        # through unapplied) — each variant's specific_price is computed from its own full
+        # price (base + this combination's own price delta), matching how PrestaShop applies
+        # a percentage reduction to the final retail price, not just the base component.
+        rows = specific_price_rows if specific_price_rows is not None else self._specific_price_rows(product_id)
         combos_data = self._get("/api/combinations", {"display": "full", "filter[id_product]": product_id})
         combos = self._as_list(combos_data, "combinations", "combination")
 
         if not combos:
             qty = self._stock_quantity(product_id, _NO_COMBINATION_ATTR_ID)
             variant_id = f"{product_id}#{_NO_COMBINATION_ATTR_ID}"
-            return [Variant(id=variant_id, attributes={}, price=base_price, in_stock=qty > 0, stock_quantity=qty)]
+            price = self._apply_specific_price(base_price, rows)
+            return [Variant(id=variant_id, attributes={}, price=price, in_stock=qty > 0, stock_quantity=qty)]
 
         values_data = self._get("/api/product_option_values", {"display": "full"})
         values_by_id = {str(v["id"]): v for v in self._as_list(values_data, "product_option_values", "product_option_value")}
@@ -739,11 +755,12 @@ class PrestaShopAdapter:
 
             price_impact = _as_float(combo.get("price"))
             qty = self._stock_quantity(product_id, id_product_attribute)
+            full_price = round(base_price + price_impact, 2)
             variants.append(
                 Variant(
                     id=f"{product_id}#{id_product_attribute}",
                     attributes=attributes,
-                    price=round(base_price + price_impact, 2),
+                    price=self._apply_specific_price(full_price, rows),
                     in_stock=qty > 0,
                     stock_quantity=qty,
                 )
@@ -763,12 +780,51 @@ class PrestaShopAdapter:
     def _effective_price(self, id_product: int, id_product_attribute: int) -> float:
         product_data = self._get(f"/api/products/{id_product}")
         raw = (product_data or {}).get("product", product_data or {})
-        base_price = _as_float(raw.get("price"))
-        if id_product_attribute == _NO_COMBINATION_ATTR_ID:
-            return base_price
-        combo_data = self._get(f"/api/combinations/{id_product_attribute}")
-        combo_raw = (combo_data or {}).get("combination", combo_data or {})
-        return round(base_price + _as_float(combo_raw.get("price")), 2)
+        price = _as_float(raw.get("price"))
+        if id_product_attribute != _NO_COMBINATION_ATTR_ID:
+            combo_data = self._get(f"/api/combinations/{id_product_attribute}")
+            combo_raw = (combo_data or {}).get("combination", combo_data or {})
+            price = round(price + _as_float(combo_raw.get("price")), 2)
+        return self._apply_specific_price(price, self._specific_price_rows(id_product))
+
+    def _specific_price_rows(self, id_product: int) -> list[dict]:
+        data = self._get("/api/specific_prices", {"display": "full", "filter[id_product]": id_product})
+        return self._as_list(data, "specific_prices", "specific_price")
+
+    def _apply_specific_price(self, price: float, rows: list[dict]) -> float:
+        """Applies whichever currently-active specific_price rule yields the lowest price,
+        deliberately conservative about which rules it understands: PrestaShop's real
+        specific-price resolution also weighs currency/country/customer-group scoping,
+        per-combination rules, and a priority order among several applicable rules — none of
+        that is replicated here. A rule outside this narrow, unscoped case (found live: a
+        universal, always-active percentage reduction with no shop/customer/group/currency/
+        country restriction) is skipped rather than guessed at — quoting the higher,
+        undiscounted price is the safer failure mode than quoting one checkout won't
+        actually honor. See prestashop.py's module docstring for why this needs re-checking
+        against a live store before being trusted for a real, differently-configured shop."""
+        best = price
+        for row in rows:
+            if any(
+                _as_int(row.get(key, 0)) != 0
+                for key in (
+                    "id_product_attribute", "id_shop", "id_shop_group", "id_currency",
+                    "id_country", "id_group", "id_customer",
+                )
+            ):
+                continue
+            if _as_int(row.get("from_quantity", 1)) > 1:
+                continue
+            if not self._within_date_range({"date_from": row.get("from"), "date_to": row.get("to")}):
+                continue
+            fixed_price = _as_float(row.get("price"), -1.0)
+            if fixed_price >= 0:
+                candidate = fixed_price
+            elif row.get("reduction_type") == "percentage":
+                candidate = price * (1 - _as_float(row.get("reduction")))
+            else:
+                candidate = price - _as_float(row.get("reduction"))
+            best = min(best, round(candidate, 2))
+        return best
 
     def _find_cart_rule(self, code: str) -> dict | None:
         data = self._get("/api/cart_rules", {"display": "full", "filter[code]": code})
