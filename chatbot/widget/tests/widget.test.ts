@@ -200,6 +200,61 @@ describe("assistant-chat-widget", () => {
     expect(JSON.parse(requestInit.body).customer_email).toBeUndefined();
   });
 
+  it("renders real product links pointing at the store's own product controller URL", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        session_id: "s1",
+        reply: "Here's what I found: Classic T-Shirt ($19.99)",
+        needs_confirmation: false,
+        product_links: [{ id: "prod-tshirt-1", name: "Classic T-Shirt" }],
+        show_cart_link: false,
+      }),
+    }));
+
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+    const shadow = widget.shadowRoot!;
+    const input = shadow.querySelector<HTMLInputElement>("input")!;
+    const form = shadow.querySelector<HTMLFormElement>("form")!;
+    input.value = "show me t-shirts";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await vi.waitFor(() => {
+      expect(shadow.querySelector(".links a")).not.toBeNull();
+    });
+    const link = shadow.querySelector<HTMLAnchorElement>(".links a")!;
+    expect(link.href).toBe(`${window.location.origin}/index.php?id_product=prod-tshirt-1&controller=product`);
+    expect(link.textContent).toContain("Classic T-Shirt");
+  });
+
+  it("renders a cart link when the reply is cart-adjacent", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        session_id: "s1",
+        reply: "Add 1 x Classic T-Shirt?",
+        needs_confirmation: true,
+        product_links: [],
+        show_cart_link: true,
+      }),
+    }));
+
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+    const shadow = widget.shadowRoot!;
+    const input = shadow.querySelector<HTMLInputElement>("input")!;
+    const form = shadow.querySelector<HTMLFormElement>("form")!;
+    input.value = "add the classic t-shirt to my cart";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await vi.waitFor(() => {
+      expect(shadow.querySelector(".links a")).not.toBeNull();
+    });
+    const link = shadow.querySelector<HTMLAnchorElement>(".links a")!;
+    expect(link.href).toBe(`${window.location.origin}/index.php?controller=cart`);
+  });
+
   it("restores the visible transcript after a simulated page navigation", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

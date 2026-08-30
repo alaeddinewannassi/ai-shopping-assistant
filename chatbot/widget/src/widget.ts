@@ -6,7 +6,7 @@
  * page without clashing with the host site's CSS.
  */
 
-import { sendChatMessage } from "./api";
+import { sendChatMessage, type ProductLink } from "./api";
 
 const CHAT_ICON = `<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>`;
 const CLOSE_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
@@ -76,6 +76,9 @@ const STYLE = `
   .message.assistant { background: #f2f2f2; margin-right: 40px; }
   .message.assistant.confirm { background: #fff6da; border: 1px solid #e0c46c; }
   .badge { display: block; font-size: 11px; font-weight: 600; color: #8a6d00; margin-bottom: 4px; }
+  .links { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+  .links a { color: #2563eb; font-size: 13px; text-decoration: none; }
+  .links a:hover { text-decoration: underline; }
   form { flex: 0 0 auto; display: flex; border-top: 1px solid #ccc; }
   input { flex: 1; border: none; padding: 8px; font-size: 14px; outline: none; }
   button { border: none; background: #2563eb; color: #fff; padding: 0 16px; cursor: pointer; }
@@ -90,6 +93,8 @@ interface StoredMessage {
   text: string;
   role: "user" | "assistant";
   confirm: boolean;
+  productLinks?: ProductLink[];
+  showCartLink?: boolean;
 }
 
 // A traditional server-rendered storefront (like PrestaShop) does a full page load on every
@@ -176,7 +181,7 @@ export class AssistantChatWidget extends HTMLElement {
     this.messagesEl = document.createElement("div");
     this.messagesEl.className = "messages";
     for (const stored of this.messageHistory) {
-      this.renderMessage(stored.text, stored.role, stored.confirm);
+      this.renderMessage(stored.text, stored.role, stored.confirm, stored.productLinks ?? [], stored.showCartLink ?? false);
     }
 
     const form = document.createElement("form");
@@ -249,7 +254,13 @@ export class AssistantChatWidget extends HTMLElement {
   /** DOM-only — renders one message bubble without touching stored history. Used both by
    * appendMessage() (a genuinely new message) and connectedCallback() (replaying history
    * already in storage, which must not be re-saved as if it were new). */
-  private renderMessage(text: string, role: "user" | "assistant", confirm: boolean): void {
+  private renderMessage(
+    text: string,
+    role: "user" | "assistant",
+    confirm: boolean,
+    productLinks: ProductLink[] = [],
+    showCartLink = false,
+  ): void {
     const el = document.createElement("div");
     el.className = `message ${role}${confirm ? " confirm" : ""}`;
     if (confirm) {
@@ -261,13 +272,42 @@ export class AssistantChatWidget extends HTMLElement {
     const textNode = document.createElement("span");
     textNode.textContent = text;
     el.appendChild(textNode);
+
+    if (productLinks.length > 0 || showCartLink) {
+      const links = document.createElement("div");
+      links.className = "links";
+      const origin = window.location.origin;
+      for (const product of productLinks) {
+        const a = document.createElement("a");
+        // PrestaShop's stable, always-valid controller URL — works regardless of
+        // friendly-URL/rewrite config, redirects to the real product page (verified
+        // against a live store; no tenant-specific public URL needs configuring here).
+        a.href = `${origin}/index.php?id_product=${encodeURIComponent(product.id)}&controller=product`;
+        a.textContent = `View: ${product.name} →`;
+        links.appendChild(a);
+      }
+      if (showCartLink) {
+        const a = document.createElement("a");
+        a.href = `${origin}/index.php?controller=cart`;
+        a.textContent = "View my cart →";
+        links.appendChild(a);
+      }
+      el.appendChild(links);
+    }
+
     this.messagesEl.appendChild(el);
     this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
   }
 
-  private appendMessage(text: string, role: "user" | "assistant", confirm = false): void {
-    this.renderMessage(text, role, confirm);
-    this.messageHistory.push({ text, role, confirm });
+  private appendMessage(
+    text: string,
+    role: "user" | "assistant",
+    confirm = false,
+    productLinks: ProductLink[] = [],
+    showCartLink = false,
+  ): void {
+    this.renderMessage(text, role, confirm, productLinks, showCartLink);
+    this.messageHistory.push({ text, role, confirm, productLinks, showCartLink });
     this.saveMessageHistory();
   }
 
@@ -281,14 +321,14 @@ export class AssistantChatWidget extends HTMLElement {
     this.buttonEl.disabled = true;
 
     try {
-      const { reply, needs_confirmation } = await sendChatMessage(
+      const { reply, needs_confirmation, product_links, show_cart_link } = await sendChatMessage(
         this.apiBase,
         this.sessionId,
         message,
         this.tenantKey,
         this.customerEmail,
       );
-      this.appendMessage(reply, "assistant", needs_confirmation);
+      this.appendMessage(reply, "assistant", needs_confirmation, product_links, show_cart_link);
     } catch {
       this.appendMessage(
         "Sorry, I couldn't reach the assistant service right now. Please try again.",

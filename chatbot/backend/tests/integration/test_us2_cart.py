@@ -276,3 +276,14 @@ def test_add_pronoun_with_variant_descriptor_resolves_against_the_single_last_sh
 
     assert "couldn't find a product" not in reply.lower()
     assert "Blue Jacket" in reply
+
+
+def test_cart_action_marks_the_turn_as_cart_link_worthy(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    ctx = _ctx(adapter, llm_client, session_store)
+    handle_turn(ctx, "u15", "add the red classic t-shirt to my cart")
+
+    session = session_store.get_or_create("u15")
+    assert session.last_turn_shows_cart_link is True
+    assert session.last_turn_product_ids == []  # this is a cart link, not a product link

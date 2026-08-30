@@ -1,9 +1,16 @@
 /** Thin client for the assistant's POST /chat endpoint (T063). */
 
+export interface ProductLink {
+  id: string;
+  name: string;
+}
+
 export interface ChatResponse {
   session_id: string;
   reply: string;
   needs_confirmation: boolean;
+  product_links: ProductLink[];
+  show_cart_link: boolean;
 }
 
 export async function sendChatMessage(

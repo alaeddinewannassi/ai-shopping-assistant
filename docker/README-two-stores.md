@@ -107,11 +107,15 @@ PrestaShop storefront with the chat launcher in the bottom-right corner already,
 demo page needed. Try a few turns in each (discovery, add to cart with confirmation,
 checkout) — each conversation writes analytics events tagged to that store's own tenant.
 
-Reminder from `chatbot/backend/src/agent/intents.py`'s `handle_navigate`: asking the
-assistant to "show me the jackets category" returns that category's products as a **chat
-reply**, not a real page navigation — the widget never does `window.location`. Chatting
-and browsing the actual storefront pages are two separate things you're testing side by
-side, not one driving the other.
+The assistant's own reply text is never a real page navigation on its own — asking "show me
+the jackets category" still returns that category's products as a **chat reply**
+(`chatbot/backend/src/agent/intents.py`'s `handle_navigate`), the widget never forces
+`window.location`. What it *does* do: search results, category browsing, and product-detail
+replies come with real, clickable "View: <product> →" links to that product's actual
+storefront page, and any cart/checkout-adjacent reply gets a "View my cart →" link — both
+built client-side (`window.location.origin` + PrestaShop's stable controller URL, e.g.
+`index.php?id_product=X&controller=product`), so you can click through into the real page
+whenever you want to, rather than the assistant redirecting you unprompted.
 
 ## Real shopper identity (optional)
 

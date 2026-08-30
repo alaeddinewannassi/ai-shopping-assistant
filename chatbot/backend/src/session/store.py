@@ -55,6 +55,12 @@ class ConversationSession:
     # — see PrestaShopAdapter.set_customer_context's docstring for the trust model), or None
     # for an anonymous/guest session using the tenant's shared demo identity.
     real_customer_email: str | None = None
+    # Reset every turn (agent/dialogue.py's _route_turn) — api/chat.py reads these right
+    # after handle_turn returns to build ChatResponse.product_links/show_cart_link, the same
+    # post-turn-session-read pattern needs_confirmation already uses.
+    last_turn_product_ids: list[str] = field(default_factory=list)
+    last_turn_product_names: list[str] = field(default_factory=list)
+    last_turn_shows_cart_link: bool = False
     pending_action: PendingAction | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -147,6 +153,9 @@ class SessionStore:
                 last_shown_products=data.get("last_shown_products", ""),
                 last_shown_product_ids=data.get("last_shown_product_ids", []),
                 real_customer_email=data.get("real_customer_email"),
+                last_turn_product_ids=data.get("last_turn_product_ids", []),
+                last_turn_product_names=data.get("last_turn_product_names", []),
+                last_turn_shows_cart_link=data.get("last_turn_shows_cart_link", False),
                 pending_action=PendingAction(**pending) if pending else None,
                 created_at=data.get("created_at", time.time()),
                 updated_at=data.get("updated_at", time.time()),

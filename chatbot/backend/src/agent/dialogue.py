@@ -523,6 +523,20 @@ _SKIP_PROMO_SUGGESTION_AFTER = {
 # are: a real test proved the model can fabricate a false mutation-completion claim.
 _PHRASABLE_ACTION_TYPES = {"search_products", "navigate_to", "get_product_details"}
 
+# Action types worth offering a real link to PrestaShop's own cart page for — every turn
+# that's cart/checkout-adjacent, regardless of outcome (even a clarifying question is worth
+# letting the shopper cross-check against the real cart, per docker/README-two-stores.md's
+# documented gap: PrestaShop's own cart UI doesn't visually reflect chatbot mutations).
+_CART_LINK_ACTION_TYPES = {
+    "propose_add_to_cart",
+    "propose_update_cart",
+    "propose_remove_from_cart",
+    "confirm_pending_action",
+    "decline_pending_action",
+    "request_checkout",
+    "apply_promo",
+}
+
 
 def _upsert_conversation_session(ctx: DialogueContext, session_id: str) -> None:
     """Best-effort per-session analytics summary (T309) — a no-op with no tenant resolved
@@ -595,12 +609,21 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         message, context=_build_llm_context(session), session_id=session_id
     )
 
+    # Populated by the branches below, then written onto the session at the very end so
+    # api/chat.py can turn them into real product/cart links after handle_turn returns —
+    # the same post-turn-session-read pattern as needs_confirmation, not a return-type
+    # change to handle_turn/_route_turn (which dozens of existing tests treat as plain str).
+    product_links: list[tuple[str, str]] = []
+    shows_cart_link = action.action_type in _CART_LINK_ACTION_TYPES
+
     if action.action_type == "search_products":
         query = action.parameters.get("query", message)
         outcome = ctx.discovery_handler.handle_search(query)
         _record_navigation(ctx.session_store, session, outcome)
         log_action(session_id, action.action_type, "search_products", outcome.kind.value, details={"query": query})
         reply = render_discovery_reply(outcome)
+        if outcome.kind == DiscoveryKind.PRODUCTS:
+            product_links = [(p.id, p.name) for p in outcome.products[:5]]
 
     elif action.action_type == "navigate_to":
         target = action.parameters.get("target", message)
@@ -608,6 +631,8 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         _record_navigation(ctx.session_store, session, outcome)
         log_action(session_id, action.action_type, "navigate_to", outcome.kind.value, details={"target": target})
         reply = render_discovery_reply(outcome)
+        if outcome.kind == DiscoveryKind.NAVIGATE_CATEGORY:
+            product_links = [(p.id, p.name) for p in outcome.products[:5]]
 
     elif action.action_type == "get_product_details":
         # Answers "what sizes/colors do you have?" with real catalog data — resolved via the
@@ -619,6 +644,8 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         _record_navigation(ctx.session_store, session, outcome)
         log_action(session_id, action.action_type, "get_product_details", outcome.kind.value)
         reply = render_discovery_reply(outcome)
+        if outcome.kind == DiscoveryKind.PRODUCT_DETAILS:
+            product_links = [(p.id, p.name) for p in outcome.products]
 
     elif action.action_type == "propose_add_to_cart" and ctx.cart_handler and ctx.pending_gate:
         reply = _handle_propose_add_to_cart(
@@ -665,6 +692,15 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         final_reply = reply
     else:
         final_reply = _maybe_suggest_promo(ctx, session_id, reply)
+
+    # Reset every turn (never accumulates stale links from an earlier, unrelated turn) —
+    # api/chat.py reads these right after handle_turn returns to build real, clickable
+    # product/cart links (window.location.origin + these ids, computed client-side — see
+    # widget.ts — so no tenant-specific public storefront URL needs configuring here).
+    session.last_turn_product_ids = [pid for pid, _ in product_links]
+    session.last_turn_product_names = [name for _, name in product_links]
+    session.last_turn_shows_cart_link = shows_cart_link
+    ctx.session_store.save(session)
 
     if action.action_type == "ask_or_chat":
         # Already the LLM's own words — rephrasing an LLM's own output would just spend a

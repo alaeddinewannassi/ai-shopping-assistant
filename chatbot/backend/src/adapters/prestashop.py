@@ -333,10 +333,7 @@ class PrestaShopAdapter:
         return groups
 
     def get_cart(self, session_id: str) -> Cart:
-        id_cart = self._cart_id_map.get(session_id)
-        if id_cart is None:
-            id_cart = self._create_cart()
-            self._cart_id_map[session_id] = id_cart
+        id_cart = self._get_or_create_ps_cart(session_id)
         return self._read_cart(id_cart)
 
     # -- Mutating: only ever called from a confirmed PendingAction ---------- #

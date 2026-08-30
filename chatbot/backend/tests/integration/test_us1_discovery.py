@@ -239,3 +239,33 @@ def test_get_product_details_never_fabricates_an_answer_with_nothing_to_back_it(
     reply = handle_turn(ctx, "s13", "what sizes does the completely nonexistent thing have")
 
     assert "couldn't find" in reply.lower()
+
+
+# -- Per-turn product/cart links (api/chat.py's ChatResponse.product_links/show_cart_link) #
+
+
+def test_search_records_product_links_for_this_turn(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    handle_turn(_ctx(adapter, llm_client, session_store), "s14", "show me jackets")
+
+    session = session_store.get_or_create("s14")
+    assert session.last_turn_product_ids == ["prod-jacket-1"]
+    assert session.last_turn_product_names == ["Blue Jacket"]
+    assert session.last_turn_shows_cart_link is False
+
+
+def test_product_links_do_not_linger_into_an_unrelated_later_turn(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    ctx = _ctx(adapter, RuleBasedStubClient(), session_store)
+    handle_turn(ctx, "s15", "show me jackets")
+    assert session_store.get_or_create("s15").last_turn_product_ids == ["prod-jacket-1"]
+
+    scripted = _ScriptedLLMClient(ActionCall(action_type="ask_or_chat", parameters={"text": "Sure!"}))
+    ctx2 = _ctx(adapter, scripted, session_store)
+    handle_turn(ctx2, "s15", "thanks")
+
+    session = session_store.get_or_create("s15")
+    assert session.last_turn_product_ids == []
+    assert session.last_turn_product_names == []

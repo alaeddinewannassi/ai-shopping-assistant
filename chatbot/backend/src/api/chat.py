@@ -48,6 +48,11 @@ class ChatRequest(BaseModel):
     customer_email: str | None = None
 
 
+class ProductLink(BaseModel):
+    id: str
+    name: str
+
+
 class ChatResponse(BaseModel):
     session_id: str
     reply: str
@@ -56,6 +61,16 @@ class ChatResponse(BaseModel):
     # the wording, so the widget can no longer infer this by scanning the reply text for a
     # literal "reply 'yes' to confirm" marker the way it originally did).
     needs_confirmation: bool = False
+    # Real products this turn's reply is about (search/navigate/product-details results) —
+    # the widget renders these as clickable links to the actual storefront product page,
+    # built client-side from window.location.origin + this id (see widget.ts), so no
+    # tenant-specific public URL needs configuring on the backend.
+    product_links: list[ProductLink] = []
+    # This turn was cart/checkout-adjacent — the widget offers a link to PrestaShop's own
+    # cart page (again built client-side). Doesn't guarantee the native cart UI reflects
+    # what the chatbot just did (docker/README-two-stores.md's documented gap) — it's a
+    # cross-check the shopper can use, not a claim of sync.
+    show_cart_link: bool = False
 
 
 def _check_redis() -> str:
@@ -127,7 +142,14 @@ def chat(
     )
     session = runtime.dialogue_ctx.session_store.get_or_create(request.session_id)
     return ChatResponse(
-        session_id=request.session_id, reply=reply, needs_confirmation=session.pending_action is not None
+        session_id=request.session_id,
+        reply=reply,
+        needs_confirmation=session.pending_action is not None,
+        product_links=[
+            ProductLink(id=pid, name=name)
+            for pid, name in zip(session.last_turn_product_ids, session.last_turn_product_names)
+        ],
+        show_cart_link=session.last_turn_shows_cart_link,
     )
 
 
