@@ -256,6 +256,59 @@ def test_specific_price_rows_degrades_to_no_reduction_when_permission_denied() -
     assert adapter._specific_price_rows(1) == []
 
 
+# -- The three write-path (_xml_request) callers with the same status-check-outside- #
+# -- the-breaker bug as _get, above — real live crash confirmed for the first one -- #
+
+
+def test_apply_specific_price_discount_converts_a_non_404_4xx_into_adapter_unavailable() -> None:
+    """Regression test for a real bug found via live testing: applying a promo code writes
+    a per-line specific_price to represent the discount, and this tenant's key also lacked
+    permission for that write — the resulting 401 was raised as a raw _TransportError
+    (checked after _xml_request/breaker.call already returned, so it escapes unhandled)
+    instead of the graceful AdapterUnavailableError _handle_confirm already handles."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"cart": {"associations": {"cart_rows": [
+                {"id_product": "1", "id_product_attribute": "0", "quantity": "1"}
+            ]}}})
+        return httpx.Response(401, json={"errors": [{"code": 26, "message": "not allowed"}]})
+
+    adapter = _adapter_with_mock_transport(handler)
+    try:
+        adapter._apply_specific_price_discount(1, {"reduction_percent": "10"})
+    except AdapterUnavailableError:
+        pass
+    else:
+        raise AssertionError("expected AdapterUnavailableError for a non-404 4xx response")
+
+
+def test_create_cart_converts_a_non_404_4xx_into_adapter_unavailable() -> None:
+    adapter = _adapter_with_mock_transport(
+        lambda r: httpx.Response(401, json={"errors": [{"code": 26, "message": "not allowed"}]})
+    )
+    try:
+        adapter._create_cart(customer_id="1")
+    except AdapterUnavailableError:
+        pass
+    else:
+        raise AssertionError("expected AdapterUnavailableError for a non-404 4xx response")
+
+
+def test_upsert_cart_row_converts_a_non_404_4xx_into_adapter_unavailable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"cart": {"associations": {"cart_rows": []}}})
+        return httpx.Response(401, json={"errors": [{"code": 26, "message": "not allowed"}]})
+
+    adapter = _adapter_with_mock_transport(handler)
+    try:
+        adapter._upsert_cart_row(1, id_product=1, id_product_attribute=0, quantity=2)
+    except AdapterUnavailableError:
+        pass
+    else:
+        raise AssertionError("expected AdapterUnavailableError for a non-404 4xx response")
+
+
 # -- Real-shopper identity resolution (set_customer_context) -------------------------- #
 
 

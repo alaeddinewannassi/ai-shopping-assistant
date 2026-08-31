@@ -478,7 +478,14 @@ class PrestaShopAdapter:
             )
             resp = self._xml_request("POST", "/api/specific_prices", xml)
             if resp.status_code >= 400:
-                raise _TransportError(
+                # Not _TransportError: that's an internal marker CircuitBreaker.call only
+                # recognizes when raised INSIDE the wrapped closure — this status check runs
+                # after _xml_request (and breaker.call) already returned, so raising it here
+                # would escape unhandled straight out of apply_promo (confirmed live: a
+                # missing specific_prices permission 401'd here and crashed the whole
+                # request instead of surfacing _handle_confirm's existing, graceful
+                # "store is temporarily unreachable" message).
+                raise AdapterUnavailableError(
                     f"Failed to apply promo discount to cart {id_cart}: "
                     f"{resp.status_code} {resp.text[:200]}"
                 )
@@ -572,7 +579,10 @@ class PrestaShopAdapter:
         xml_body = self._build_xml("cart", fields)
         resp = self._xml_request("POST", "/api/carts", xml_body)
         if resp.status_code >= 400:
-            raise _TransportError(f"Failed to create cart: {resp.status_code} {resp.text[:200]}")
+            # AdapterUnavailableError, not _TransportError — see the matching comment in
+            # _apply_specific_price_discount above; this check also runs after breaker.call
+            # already returned, so _TransportError here would escape unhandled.
+            raise AdapterUnavailableError(f"Failed to create cart: {resp.status_code} {resp.text[:200]}")
         data = resp.json()
         raw = data.get("cart", data)
         return _as_int(raw.get("id"))
@@ -697,7 +707,10 @@ class PrestaShopAdapter:
         xml_body = self._build_xml("cart", {"id": id_cart}, associations_xml=f"<cart_rows>{rows_xml}</cart_rows>")
         resp = self._xml_request("PATCH", f"/api/carts/{id_cart}", xml_body)
         if resp.status_code >= 400:
-            raise _TransportError(f"Failed to update cart {id_cart}: {resp.status_code} {resp.text[:200]}")
+            # AdapterUnavailableError, not _TransportError — see the matching comment in
+            # _apply_specific_price_discount above; this check also runs after breaker.call
+            # already returned, so _TransportError here would escape unhandled.
+            raise AdapterUnavailableError(f"Failed to update cart {id_cart}: {resp.status_code} {resp.text[:200]}")
 
     # -- Internal: product/stock/promo lookups -------------------------------- #
 
