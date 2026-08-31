@@ -115,6 +115,26 @@ def test_no_matches_returns_plain_message_not_dead_end(
     assert session.navigation_context == {}
 
 
+def test_empty_umbrella_category_false_match_falls_back_to_keyword_search(
+    llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    """Real bug: a full sentence that merely mentions a category word in passing
+    ("...outerwear...") can substring-match an umbrella category with no directly-attached
+    products (taxonomy_resolver._normalize is a loose substring check, fine for a short
+    category term but not for an arbitrary sentence). That empty "exact" match must not
+    shadow a real keyword match sitting elsewhere in the catalog."""
+    adapter = MockAdapter()
+    adapter._categories["cat-outerwear"] = Category(id="cat-outerwear", name="Outerwear")
+
+    reply = handle_turn(
+        _ctx(adapter, llm_client, session_store),
+        "s4b",
+        "looking for something in outerwear, maybe the classic shirt",
+    )
+    assert "Classic T-Shirt" in reply
+    assert "couldn't find" not in reply
+
+
 # -- Edge case: store backend unreachable during discovery (T021a, FR-016) ---- #
 
 

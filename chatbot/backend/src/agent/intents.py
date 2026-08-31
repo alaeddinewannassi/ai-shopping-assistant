@@ -150,12 +150,22 @@ class DiscoveryIntentHandler:
             return DiscoveryOutcome(
                 kind=DiscoveryKind.CLARIFY, clarifying_options=category_result.candidates
             )
-        query = term
         if category_result is not None and category_result.status == ResolutionStatus.EXACT:
-            filters["category_id"] = category_result.resolved_id
-            query = ""
+            category_outcome = self._run_search(
+                cache_key=f"search:{term}:{max_price}:cat{category_result.resolved_id}",
+                query="",
+                filters={**filters, "category_id": category_result.resolved_id},
+            )
+            if category_outcome.kind != DiscoveryKind.NO_MATCH:
+                return category_outcome
+            # The resolver's category match is a loose substring check (see
+            # taxonomy_resolver._normalize) — fine for a short category term ("t-shirt"),
+            # but a full sentence that merely mentions a category word in passing ("she
+            # likes clothes, maybe a t-shirt") can "exact"-match an umbrella category with
+            # no directly-attached products. An empty category shouldn't shadow a real
+            # keyword match sitting elsewhere in the catalog — fall back to plain search.
 
-        return self._run_search(cache_key=f"search:{term}:{max_price}", query=query, filters=filters)
+        return self._run_search(cache_key=f"search:{term}:{max_price}", query=term, filters=filters)
 
     def handle_navigate(self, raw_text: str) -> DiscoveryOutcome:
         """Scenario 2 (navigate to a named category/product)."""
