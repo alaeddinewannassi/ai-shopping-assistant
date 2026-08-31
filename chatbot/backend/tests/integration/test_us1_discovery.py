@@ -306,6 +306,35 @@ def test_get_product_details_reply_includes_the_real_catalog_description(
     assert "cotton" in reply.lower()
 
 
+def test_named_reference_with_trailing_chatter_resolves_against_the_last_shown_product(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    """Regression test for a real live bug: "the adventure begins one, does it come in
+    different sizes?" (a named reference to a just-shown product, plus a trailing question)
+    went ambiguous because a generic word in the trailing question ("come") happened to
+    OR-match a completely different, unrelated product's own name ("...yet to come'"
+    poster) — and the AND-narrowing step couldn't collapse the resulting candidates back to
+    one, since no single product matches every noisy token. Whichever candidate was
+    actually just shown to the shopper is a much stronger disambiguating signal than a
+    keyword collision with an unrelated product."""
+    session = session_store.get_or_create("s12c")
+    session.last_shown_product_ids = ["prod-jacket-1"]
+    session_store.save(session)
+
+    scripted = _ScriptedLLMClient(
+        ActionCall(
+            action_type="get_product_details",
+            parameters={"raw_text": "the jacket one, is it 100% cotton like the other item"},
+        )
+    )
+    ctx = _ctx(adapter, scripted, session_store)
+
+    reply = handle_turn(ctx, "s12c", "the jacket one, is it 100% cotton like the other item")
+
+    assert "Blue Jacket" in reply
+    assert "?" not in reply or "did you mean" not in reply.lower()
+
+
 def test_get_product_details_never_fabricates_an_answer_with_nothing_to_back_it(
     adapter: MockAdapter, session_store: SessionStore
 ) -> None:

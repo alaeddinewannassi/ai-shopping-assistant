@@ -388,6 +388,17 @@ def _resolve_single_product(
             ]
             if len(narrowed) == 1:
                 products = narrowed
+    if len(products) > 1 and last_shown_ids:
+        # Keyword AND-narrowing alone still leaves several candidates when the raw text
+        # mixes a product reference with unrelated trailing chatter ("the adventure begins
+        # one, does it come in different sizes?" — "come" happens to OR-match a differently
+        # themed product's own name, "...yet to come'"). Real, confirmed live bug: rather
+        # than guess from noisy keywords, prefer whichever candidate was actually just shown
+        # to this shopper — much stronger signal than a keyword collision with an unrelated
+        # product's name.
+        shown = [p for p in products if p.id in last_shown_ids]
+        if len(shown) == 1:
+            products = shown
     if len(products) > 1:
         return None, products[:5]
     return products[0], []
