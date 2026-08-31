@@ -356,6 +356,20 @@ def _resolve_single_product(
                 pass
         return None, []
     if len(products) > 1:
+        # The shopper may have typed a product's exact catalog name verbatim ("the Mountain
+        # fox cushion, is it in stock and what colors does it come in?") — real, confirmed
+        # live bug: even naming the product exactly didn't resolve it, because a generic
+        # word elsewhere in the same message ("...does it COME in...") still OR-matched a
+        # completely different product's own name ("...yet to COME'" poster), and the
+        # AND-narrowing below then failed to collapse to one (no single product satisfies
+        # every noisy token from the trailing question too). A verbatim, exact product name
+        # in the shopper's own words is a far stronger signal than any token-matching
+        # heuristic — check it first, before the noisier keyword narrowing.
+        raw_lower = raw_text.lower()
+        named = [p for p in products if p.name.lower() in raw_lower]
+        if len(named) == 1:
+            products = named
+    if len(products) > 1:
         # "I want the tshirt not the jacket" — "not" itself correctly matches no product
         # (token_matches_name, not a loose substring check — "not" is deliberately never a
         # false match for "notebook" anymore). But requiring EVERY token to match, "not"

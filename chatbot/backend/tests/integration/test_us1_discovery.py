@@ -332,6 +332,31 @@ def test_named_reference_with_trailing_chatter_resolves_against_the_last_shown_p
     reply = handle_turn(ctx, "s12c", "the jacket one, is it 100% cotton like the other item")
 
     assert "Blue Jacket" in reply
+
+
+def test_exact_verbatim_product_name_resolves_even_with_noisy_trailing_words(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    """Regression test for a real live bug, worse than the one above: even typing a
+    product's exact catalog name verbatim ("the Mountain fox cushion, is it in stock and
+    what colors does it come in?") still went ambiguous, because "...does it COME in..."
+    OR-matched a completely unrelated product's own name ("...yet to COME'" poster) and
+    the keyword AND-narrowing couldn't collapse it back down (no candidate matches every
+    noisy token, including "come"). Nothing was in last_shown_ids here either, so the
+    prior fix (prefer a just-shown candidate) doesn't help — a verbatim exact product name
+    typed by the shopper must be checked directly, before any keyword heuristic."""
+    scripted = _ScriptedLLMClient(
+        ActionCall(
+            action_type="get_product_details",
+            parameters={"raw_text": "the Classic T-Shirt, is it built to handle cold weather?"},
+        )
+    )
+    ctx = _ctx(adapter, scripted, session_store)
+
+    reply = handle_turn(ctx, "s12d", "the Classic T-Shirt, is it built to handle cold weather?")
+
+    assert "Classic T-Shirt" in reply
+    assert "did you mean" not in reply.lower()
     assert "?" not in reply or "did you mean" not in reply.lower()
 
 
