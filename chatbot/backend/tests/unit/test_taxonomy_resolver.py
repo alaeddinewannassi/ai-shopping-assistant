@@ -5,6 +5,7 @@ Deterministic, no LLM/network involved — exercises exact/ambiguous/unsupported
 
 from __future__ import annotations
 
+from src.adapters.base import Category
 from src.adapters.mock import MockAdapter
 from src.agent.taxonomy_resolver import ResolutionStatus, TaxonomyResolver
 
@@ -83,3 +84,23 @@ def test_never_invents_a_filter_id_not_present_in_snapshot() -> None:
         color_result = resolver.resolve_attribute_value("Color", term)
         if color_result.resolved_id is not None:
             assert color_result.resolved_id in real_color_values
+
+
+# -- list_category_names (LLM context-grounding, real bug: hallucinated categories) --- #
+
+
+def test_list_category_names_returns_the_real_names() -> None:
+    resolver = make_resolver()
+    assert set(resolver.list_category_names()) == {"T-Shirts", "Jackets"}
+
+
+def test_list_category_names_excludes_prestashops_internal_root_category() -> None:
+    """Regression test for a real gap noticed while fixing a live hallucination: PrestaShop's
+    own hardcoded internal top-level "Root" category (present on every store, never a real
+    merchant department) was leaking into this grounding data verbatim — harmless so far,
+    but this is customer-facing suggestion material, so filtered defensively."""
+    adapter = MockAdapter()
+    adapter._categories["cat-root"] = Category(id="cat-root", name="Root")
+    resolver = TaxonomyResolver(adapter)
+    assert "Root" not in resolver.list_category_names()
+    assert set(resolver.list_category_names()) == {"T-Shirts", "Jackets"}

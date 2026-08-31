@@ -737,11 +737,23 @@ def handle_turn(
         return reply
 
 
-def _build_llm_context(session: ConversationSession) -> dict:
+def _build_llm_context(session: ConversationSession, ctx: DialogueContext) -> dict:
     """Context passed to LLMClient.parse_turn() — additive only, RuleBasedStubClient
     ignores it entirely. `pending_action` lets a real model correctly route "yes"/"actually,
     cancel that" against what's actually pending, rather than guessing from bare keywords."""
     context: dict = {"navigation_context": session.navigation_context}
+    try:
+        # Real, confirmed live bug: a vague gift request with nothing else in context
+        # ("surprise me for our anniversary") got the LLM improvising generic e-commerce
+        # categories ("jewelry, a handbag, a watch") this store doesn't sell — grounding
+        # data for it to reference the real ones instead. Best-effort: a store outage here
+        # must not break every single turn (including plain chit-chat), so any failure
+        # degrades to "nothing to add," same as every other context-enrichment field.
+        categories = ctx.discovery_handler.list_category_names()
+    except AdapterUnavailableError:
+        categories = []
+    if categories:
+        context["store_categories"] = categories
     if session.last_shown_products:
         context["last_shown_products"] = session.last_shown_products
     if session.pending_action is not None:
@@ -772,7 +784,7 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         action = ActionCall(action_type="propose_add_to_cart", parameters={"raw_text": message})
     else:
         action = ctx.llm_client.parse_turn(
-            message, context=_build_llm_context(session), session_id=session_id
+            message, context=_build_llm_context(session, ctx), session_id=session_id
         )
 
     # Populated by the branches below, then written onto the session at the very end so

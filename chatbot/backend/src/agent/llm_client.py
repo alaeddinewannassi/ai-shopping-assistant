@@ -396,6 +396,14 @@ def _build_user_content(message: str, context: dict) -> str:
     nav = context.get("navigation_context")
     if nav:
         lines.append(f"[Context: the shopper is currently browsing {nav}]")
+    categories = context.get("store_categories")
+    if categories:
+        lines.append(
+            f"[Context: this store's real categories are: {', '.join(categories)} — if "
+            "suggesting where to look (e.g. for a vague gift request), only ever mention "
+            "categories from this list, never a generic guess like \"jewelry\" or "
+            "\"electronics\" that isn't in it]"
+        )
     last_shown = context.get("last_shown_products")
     if last_shown:
         lines.append(f"[Context: you just showed the shopper these products: {last_shown}]")

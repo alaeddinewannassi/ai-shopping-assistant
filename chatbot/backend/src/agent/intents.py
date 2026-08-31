@@ -126,6 +126,11 @@ class DiscoveryIntentHandler:
         self._resolver = resolver
         self._cache = catalog_cache or CatalogSnapshotCache()
 
+    def list_category_names(self) -> list[str]:
+        """See TaxonomyResolver.list_category_names — real category grounding data for the
+        LLM's context, not used by any deterministic resolution logic in this class."""
+        return self._resolver.list_category_names()
+
     def handle_search(self, raw_text: str) -> DiscoveryOutcome:
         """Scenario 1 (category+constraint search), Scenario 3 (ambiguity), Scenario 4
         (no-match), and the backend-unreachable edge case (T021a)."""

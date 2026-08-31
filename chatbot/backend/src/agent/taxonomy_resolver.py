@@ -62,6 +62,23 @@ class TaxonomyResolver:
     def _snapshot(self) -> TaxonomySnapshot:
         return self._cache.get_or_refresh(self._adapter)
 
+    def list_category_names(self) -> list[str]:
+        """Real, current category names from the cached snapshot — grounding data handed to
+        the LLM (agent/dialogue.py's _build_llm_context) so vague/open-ended chat ("surprise
+        me", "what departments do you have") can reference this store's genuine categories
+        instead of guessing generic ones. Real, confirmed live bug: asked for an anniversary
+        gift idea with no other context, the LLM suggested "jewelry, a handbag, a watch" for
+        a store that sells none of those — the existing "never invent a category" rule had
+        nothing real to ground a helpful suggestion in, so it improvised from world knowledge
+        instead. May raise AdapterUnavailableError (same as resolve_category) — callers on a
+        best-effort context-enrichment path should treat that as "nothing to add," not fail
+        the turn."""
+        # "Root" is PrestaShop's own hardcoded internal top-level category (every store has
+        # one, never a real merchant-chosen department) — filtered here rather than at the
+        # adapter's list_categories(), which other callers (resolve_category's substring
+        # matching) don't need protected from, since no real shopper types "root".
+        return [c.name for c in self._snapshot().categories if c.name.strip().lower() != "root"]
+
     def resolve_category(self, term: str) -> ResolutionResult:
         snapshot = self._snapshot()
         normalized = _normalize(term)

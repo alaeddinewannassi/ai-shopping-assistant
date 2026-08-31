@@ -246,6 +246,37 @@ def test_ask_or_chat_falls_back_to_a_default_when_text_is_missing(
     assert reply == "How can I help you find something today?"
 
 
+class _ContextCapturingLLMClient:
+    """Records the context dict it was called with (last call wins) — used to verify
+    _build_llm_context actually includes real grounding data, not just that the reply
+    routes correctly."""
+
+    def __init__(self, action: ActionCall) -> None:
+        self._action = action
+        self.last_context: dict | None = None
+
+    def parse_turn(self, message: str, context: dict, *, session_id: str | None = None) -> ActionCall:
+        self.last_context = context
+        return self._action
+
+
+def test_llm_context_includes_the_stores_real_categories(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    """Regression test for a real live bug: with no other context, the LLM was left to
+    improvise categories for a vague gift request ("jewelry, a handbag, a watch" for a store
+    that sells neither) — the fix grounds it in the store's real category list instead."""
+    spy = _ContextCapturingLLMClient(
+        ActionCall(action_type="ask_or_chat", parameters={"text": "Sure, tell me more!"})
+    )
+    ctx = _ctx(adapter, spy, session_store)
+
+    handle_turn(ctx, "s9b", "surprise me, I need a gift for my wife")
+
+    assert spy.last_context is not None
+    assert set(spy.last_context.get("store_categories", [])) == {"T-Shirts", "Jackets"}
+
+
 def test_a_real_search_result_is_remembered_as_context_for_the_next_turn(
     adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
 ) -> None:
