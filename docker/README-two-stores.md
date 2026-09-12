@@ -142,10 +142,18 @@ If resolution fails for any reason (not logged in, no saved address, a webservic
 it silently and safely falls back to the demo identity — real-customer checkout is a
 best-effort enhancement, never a hard requirement.
 
-**Known gap**: even with correct order attribution, PrestaShop's own native mini-cart/
-header icon won't visually update when the chatbot adds something — that's a separate,
-larger integration (syncing PrestaShop's own cart cookie) that's out of scope here. Ask the
-chatbot "what's in my cart?" to see the real state instead.
+**Cart sync**: a confirmed add/update/remove in chat is written to PrestaShop's own real
+front-office cart (the widget executes it via the same AJAX endpoint the theme's own "Add
+to cart" button uses, against the shopper's real session) — so the native mini-cart/header
+icon and the store's own cart/checkout pages reflect it immediately, the same as if the
+shopper had clicked "Add to cart" themselves. This only applies when the widget is embedded
+on a real PrestaShop page it can read `window.prestashop.cart` from; a non-browser API
+caller keeps using a backend-tracked cart instead (see `ConversationSession.
+client_cart_snapshot`'s docstring in `chatbot/backend/src/session/store.py`).
+
+**Known gap**: applying a promo/discount code from chat is not yet synced this way — for a
+synced session, the assistant declines and points you at checkout's own discount-code field
+instead of silently discounting a cart the storefront can't see.
 
 ## 5. Verify in the backoffice — one login, both stores
 

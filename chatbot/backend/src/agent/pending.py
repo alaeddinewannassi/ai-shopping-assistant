@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from src.adapters.base import Cart, CartStateChangedError, CommerceAdapter, Order
-from src.session.store import PendingAction, SessionStore
+from src.session.store import ConversationSession, PendingAction, SessionStore
 
 # Mutation types this state machine gates. Every one of these MUST have gone through
 # propose() -> an explicit confirm() before the corresponding adapter method is called.
@@ -34,12 +34,50 @@ class ActionResult:
     cart: Optional[Cart] = None
     order: Optional[Order] = None
     error: Optional[str] = None
+    # Populated instead of actually calling the adapter's mutating method, ONLY for a
+    # session that has already provided a real client_cart_snapshot (see that field's
+    # docstring on ConversationSession) — the widget executes this against the store's real
+    # front-office cart, since that's the only place with legitimate access to the shopper's
+    # actual session. `cart` above is still populated in this case too, as a best-effort
+    # PREDICTED post-mutation cart (computed from the pre-mutation snapshot the exact same
+    # way the widget's own write will), so the recap text has something accurate to show
+    # immediately rather than waiting on a round trip that hasn't happened yet.
+    client_cart_action: Optional[dict] = None
+    # Set instead of executing checkout when the session's cart lives in the shopper's real
+    # PrestaShop session (client-synced) rather than a webservice-created cart this backend
+    # can place a real order against — see confirm()'s checkout branch.
+    handoff_to_native_checkout: bool = False
+
+
+def _apply_client_cart_op(snapshot: list[dict], op: str, variant_id: str, quantity: int) -> list[dict]:
+    """Pure function: what the snapshot would look like after `op` — used both to predict
+    the post-mutation Cart for the recap, and mirrors exactly what the widget's own
+    front-office AJAX call does (increment/set/remove), so the two never disagree."""
+    rows = [dict(row) for row in snapshot if str(row.get("variant_id")) != variant_id]
+    if op == "remove":
+        return rows
+    current = next(
+        (row for row in snapshot if str(row.get("variant_id")) == variant_id), None
+    )
+    if op == "increment":
+        new_quantity = (int(current["quantity"]) if current else 0) + quantity
+    else:  # "set"
+        new_quantity = quantity
+    if new_quantity > 0:
+        rows.append({"variant_id": variant_id, "quantity": new_quantity})
+    return rows
 
 
 class PendingActionError(Exception):
     """Raised when confirm()/decline() is attempted against a missing/stale/mismatched
     PendingAction — the caller (dialogue layer) must treat this as "nothing to confirm",
     never as an implicit approval of some other action (research.md §9.4)."""
+
+
+class PromoNotSyncableError(Exception):
+    """Raised instead of applying a promo code for a client-cart-synced session — see
+    confirm()'s apply_promo branch. The dialogue layer turns this into an honest reply
+    pointing at the store's own native checkout discount field."""
 
 
 class PendingActionGate:
@@ -80,6 +118,11 @@ class PendingActionGate:
                 "invalidated by a topic change, or never existed)."
             )
 
+        session = self._sessions.get_or_create(session_id)
+        client_synced = session.client_cart_snapshot is not None and getattr(
+            self._adapter, "supports_client_cart_sync", False
+        )
+
         try:
             if self.is_stale(action):
                 # FR-009/US3 Scenario 4, generalized (real, confirmed gap from adversarial
@@ -101,19 +144,39 @@ class PendingActionGate:
                     "Pending action expired (stale confirmation window) — ask again."
                 )
             if action.action_type == "checkout":
+                if client_synced:
+                    # The backend has no cart to place a real order against — the shopper's
+                    # actual cart lives in their own PrestaShop session (see
+                    # ConversationSession.client_cart_snapshot's docstring). Hand off to
+                    # PrestaShop's own real checkout flow instead of silently placing an
+                    # order for whatever the backend's disconnected webservice cart happens
+                    # to contain (most likely empty, since nothing has written to it).
+                    return ActionResult(action_type=action.action_type, handoff_to_native_checkout=True)
                 order = self._adapter.checkout(self._cart_id_for(session_id))
                 # The cart just placed as an order no longer represents "the shopper's
                 # current cart" — clear the persisted id so the next add/get starts a fresh
                 # one, matching PrestaShopAdapter.checkout()'s own _cart_id_map cleanup.
-                session = self._sessions.get_or_create(session_id)
-                if session.cart_id is not None:
-                    session.cart_id = None
-                    self._sessions.save(session)
+                fresh_session = self._sessions.get_or_create(session_id)
+                if fresh_session.cart_id is not None:
+                    fresh_session.cart_id = None
+                    self._sessions.save(fresh_session)
                 return ActionResult(action_type=action.action_type, order=order)
-            cart = self._execute(session_id, action)
-            if cart is not None:
+            if action.action_type == "apply_promo" and client_synced:
+                # Same reasoning as checkout above: applying a promo writes a cart-scoped
+                # discount to the backend's OWN (disconnected, likely-empty) cart, which
+                # would silently do nothing for the shopper's real order. Honest decline
+                # rather than a false "applied!" — PrestaShop's real checkout has its own
+                # native discount-code field.
+                raise PromoNotSyncableError(
+                    "Cannot apply a promo code to a client-synced cart from chat; the "
+                    "shopper's real checkout page has its own discount-code field."
+                )
+            cart, client_cart_action = self._execute(session_id, action, session, client_synced)
+            if cart is not None and not client_synced:
                 self._sessions.remember_cart_id(self._sessions.get_or_create(session_id), cart.id)
-            return ActionResult(action_type=action.action_type, cart=cart)
+            return ActionResult(
+                action_type=action.action_type, cart=cart, client_cart_action=client_cart_action
+            )
         finally:
             # Whether it succeeded or raised, this PendingAction is spent — clear it so a
             # later stray "yes" can't re-trigger or retry it silently.
@@ -123,20 +186,41 @@ class PendingActionGate:
         session = self._sessions.get_or_create(session_id)
         return session.cart_id or session_id
 
-    def _execute(self, session_id: str, action: PendingAction) -> Optional[Cart]:
+    def _execute(
+        self, session_id: str, action: PendingAction, session: ConversationSession, client_synced: bool
+    ) -> tuple[Optional[Cart], Optional[dict]]:
         params = action.parameters
-        cart_id = self._cart_id_for(session_id)
 
+        if client_synced:
+            op = {
+                "add_cart_item": "increment",
+                "update_cart_item": "set",
+                "remove_cart_item": "remove",
+            }[action.action_type]
+            variant_id = params["variant_id"]
+            quantity = params.get("quantity", 0)
+            snapshot = session.client_cart_snapshot or []
+            predicted_snapshot = _apply_client_cart_op(snapshot, op, variant_id, quantity)
+            predicted_cart = self._adapter.cart_from_snapshot(predicted_snapshot)
+            client_cart_action: dict = {"op": op, "variant_id": variant_id}
+            if op != "remove":
+                client_cart_action["quantity"] = quantity
+            return predicted_cart, client_cart_action
+
+        cart_id = self._cart_id_for(session_id)
         if action.action_type == "add_cart_item":
-            return self._adapter.add_cart_item(
-                cart_id, params["product_id"], params["variant_id"], params["quantity"]
+            return (
+                self._adapter.add_cart_item(
+                    cart_id, params["product_id"], params["variant_id"], params["quantity"]
+                ),
+                None,
             )
         if action.action_type == "update_cart_item":
-            return self._adapter.update_cart_item(cart_id, params["variant_id"], params["quantity"])
+            return self._adapter.update_cart_item(cart_id, params["variant_id"], params["quantity"]), None
         if action.action_type == "remove_cart_item":
-            return self._adapter.remove_cart_item(cart_id, params["variant_id"])
+            return self._adapter.remove_cart_item(cart_id, params["variant_id"]), None
         if action.action_type == "apply_promo":
-            return self._adapter.apply_promo(cart_id, params["code"])
+            return self._adapter.apply_promo(cart_id, params["code"]), None
 
         raise ValueError(f"Unhandled mutating action type: {action.action_type}")
 

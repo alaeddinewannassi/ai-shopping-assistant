@@ -566,4 +566,214 @@ describe("assistant-chat-widget", () => {
     expect(input.disabled).toBe(false);
     vi.useRealTimers();
   });
+
+  // -- Client-cart-sync (specs/003-adversarial-qa-review) ------------------------------ //
+  //
+  // Regression coverage for a real bug found via adversarial review: confirming an add via
+  // chat never showed up on the store's own cart page — the chatbot's cart and PrestaShop's
+  // real front-end session cart were completely disconnected. These tests confirm the
+  // widget reports its real cart to the backend, and executes any resulting instruction
+  // against PrestaShop's own front-office cart endpoint.
+
+  function mockFetchRoutedByUrl(handlers: Record<string, () => unknown>) {
+    return vi.fn().mockImplementation((url: string) => {
+      for (const [match, handler] of Object.entries(handlers)) {
+        if (url.includes(match)) {
+          return Promise.resolve({ ok: true, json: async () => handler() });
+        }
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+  }
+
+  it("reports the real PrestaShop cart contents with every chat request", async () => {
+    vi.stubGlobal("prestashop", {
+      cart: { products: [{ id_product: "18", id_product_attribute: "36", quantity: 2 }] },
+    });
+    const fetchMock = mockFetchRoutedByUrl({
+      "/chat": () => ({ session_id: "s1", reply: "Here's what I found: shoes", needs_confirmation: false }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+    const shadow = widget.shadowRoot!;
+    const input = shadow.querySelector<HTMLInputElement>("input")!;
+    const form = shadow.querySelector<HTMLFormElement>("form")!;
+    input.value = "show me shoes";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const [, requestInit] = fetchMock.mock.calls[0];
+    expect(JSON.parse(requestInit.body).cart_snapshot).toEqual([{ variant_id: "18#36", quantity: 2 }]);
+  });
+
+  it("omits cart_snapshot entirely when window.prestashop.cart is unavailable", async () => {
+    const fetchMock = mockFetchRoutedByUrl({
+      "/chat": () => ({ session_id: "s1", reply: "Here's what I found: shoes", needs_confirmation: false }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+    const shadow = widget.shadowRoot!;
+    const input = shadow.querySelector<HTMLInputElement>("input")!;
+    const form = shadow.querySelector<HTMLFormElement>("form")!;
+    input.value = "show me shoes";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const [, requestInit] = fetchMock.mock.calls[0];
+    expect(JSON.parse(requestInit.body).cart_snapshot).toBeUndefined();
+  });
+
+  it("executes a confirmed add against PrestaShop's real front-office cart endpoint", async () => {
+    vi.stubGlobal("prestashop", { cart: { products: [] } });
+    const fetchMock = mockFetchRoutedByUrl({
+      "/chat": () => ({
+        session_id: "s1",
+        reply: "Your cart now has: 1 x Hummingbird notebook.",
+        needs_confirmation: false,
+        cart_action: { op: "increment", variant_id: "18#36", quantity: 1 },
+      }),
+      "controller=cart": () => ({ success: true }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+    const shadow = widget.shadowRoot!;
+    const input = shadow.querySelector<HTMLInputElement>("input")!;
+    const form = shadow.querySelector<HTMLFormElement>("form")!;
+    input.value = "yes";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const [cartUrl, cartInit] = fetchMock.mock.calls[1];
+    expect(cartUrl).toContain("controller=cart");
+    const params = new URLSearchParams(cartInit.body as string);
+    expect(params.get("add")).toBe("1");
+    expect(params.get("id_product")).toBe("18");
+    expect(params.get("id_product_attribute")).toBe("36");
+    expect(params.get("qty")).toBe("1");
+    expect(params.get("op")).toBeNull(); // default "up" (increment)
+  });
+
+  it("computes a decrement from the current real quantity for a 'set' action", async () => {
+    vi.stubGlobal("prestashop", { cart: { products: [{ id_product: "18", id_product_attribute: "36", quantity: 5 }] } });
+    const fetchMock = mockFetchRoutedByUrl({
+      "/chat": () => ({
+        session_id: "s1",
+        reply: "Your cart now has: 2 x Hummingbird notebook.",
+        needs_confirmation: false,
+        cart_action: { op: "set", variant_id: "18#36", quantity: 2 },
+      }),
+      "controller=cart": () => ({ success: true }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+    const shadow = widget.shadowRoot!;
+    const input = shadow.querySelector<HTMLInputElement>("input")!;
+    const form = shadow.querySelector<HTMLFormElement>("form")!;
+    input.value = "yes";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const [, cartInit] = fetchMock.mock.calls[1];
+    const params = new URLSearchParams(cartInit.body as string);
+    expect(params.get("op")).toBe("down");
+    expect(params.get("qty")).toBe("3"); // 5 -> 2 is a decrement of 3
+  });
+
+  it("issues a delete for a 'remove' action, with no quantity math", async () => {
+    vi.stubGlobal("prestashop", { cart: { products: [{ id_product: "18", id_product_attribute: "36", quantity: 5 }] } });
+    const fetchMock = mockFetchRoutedByUrl({
+      "/chat": () => ({
+        session_id: "s1",
+        reply: "Removed.",
+        needs_confirmation: false,
+        cart_action: { op: "remove", variant_id: "18#36" },
+      }),
+      "controller=cart": () => ({ success: true }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+    const shadow = widget.shadowRoot!;
+    const input = shadow.querySelector<HTMLInputElement>("input")!;
+    const form = shadow.querySelector<HTMLFormElement>("form")!;
+    input.value = "yes";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const [, cartInit] = fetchMock.mock.calls[1];
+    const params = new URLSearchParams(cartInit.body as string);
+    expect(params.get("delete")).toBe("1");
+  });
+
+  it("shows an error and does not navigate when the real cart write fails", async () => {
+    vi.stubGlobal("prestashop", { cart: { products: [] } });
+    const fetchMock = mockFetchRoutedByUrl({
+      "/chat": () => ({
+        session_id: "s1",
+        reply: "Your cart now has: 1 x Hummingbird notebook.",
+        needs_confirmation: false,
+        cart_action: { op: "increment", variant_id: "18#36", quantity: 1 },
+        auto_navigate_to_cart: true,
+      }),
+      "controller=cart": () => ({ success: false, errors: ["out of stock"] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+    const shadow = widget.shadowRoot!;
+    const input = shadow.querySelector<HTMLInputElement>("input")!;
+    const form = shadow.querySelector<HTMLFormElement>("form")!;
+    input.value = "yes";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await vi.waitFor(() => {
+      expect(shadow.querySelectorAll(".message.assistant")).toHaveLength(2);
+    });
+    expect(shadow.querySelectorAll(".message.assistant")[1].textContent).toContain("couldn't update your actual cart");
+  });
+
+  it("navigates to the store's real checkout page on a synced checkout handoff", async () => {
+    const originalLocation = window.location;
+    const setHref = vi.fn();
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { origin: originalLocation.origin, set href(v: string) { setHref(v); } },
+    });
+
+    vi.stubGlobal("prestashop", { urls: { pages: { order: "https://shop.example/order" } } });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          session_id: "s1",
+          reply: "Taking you to checkout to complete your order.",
+          needs_confirmation: false,
+          auto_navigate_to_checkout: true,
+        }),
+      }),
+    );
+
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+    const shadow = widget.shadowRoot!;
+    const input = shadow.querySelector<HTMLInputElement>("input")!;
+    const form = shadow.querySelector<HTMLFormElement>("form")!;
+    input.value = "yes";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await vi.waitFor(() => expect(setHref).toHaveBeenCalledWith("https://shop.example/order"));
+
+    Object.defineProperty(window, "location", { configurable: true, value: originalLocation });
+  });
 });

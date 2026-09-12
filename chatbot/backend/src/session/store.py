@@ -66,6 +66,14 @@ class ConversationSession:
     # (unless window.prestashop.page says the shopper is already there), not just a link.
     last_turn_auto_navigate_product_id: str | None = None
     last_turn_auto_navigate_to_cart: bool = False
+    # The instruction the widget must execute against the store's real front-office cart
+    # endpoint for a just-confirmed mutation to actually take effect (client-cart-synced
+    # sessions only — see client_cart_snapshot above); None otherwise.
+    last_turn_client_cart_action: dict | None = None
+    # Set only when checkout was just confirmed for a client-cart-synced session — the
+    # widget navigates to the store's own real checkout page instead of chat having placed
+    # an order directly (see PendingActionGate.confirm()'s checkout branch).
+    last_turn_handoff_to_native_checkout: bool = False
     # Persists across turns (unlike the last_turn_* fields above) until resolved — set
     # whenever resolve_add_to_cart lands on exactly one product but can't tell which variant
     # (AMBIGUOUS_VARIANT), cleared once that's answered or a clearly different flow starts.
@@ -82,6 +90,18 @@ class ConversationSession:
     # yet completed a checkout. Flipped once by dialogue.py after a successful order — this
     # feature has no account/login system, so "first order" is scoped to this session.
     has_completed_order: bool = False
+    # Real, confirmed live bug (adversarial review, specs/003-adversarial-qa-review): a chat
+    # confirmation ("Your cart now has...") wrote to a webservice-created cart that PrestaShop's
+    # OWN front-end session (the one the shopper's normal browsing cart/checkout live in) has
+    # no way to know about — the shopper could add via chat, get told it worked, then see an
+    # EMPTY cart on the store's own cart page. PrestaShop's front-end never exposes a raw
+    # numeric cart id to JS (same reason real_customer_email above stores an email, not an
+    # id) — this is the closest available "shared truth": the shopper's browser (same origin,
+    # real session cookie) sends its OWN cart contents (window.prestashop.cart) with the chat
+    # request; the backend treats this as ground truth for reading the cart, and expresses any
+    # confirmed mutation as an instruction (dialogue.py's _client_cart_action) for the widget
+    # to execute against the store's real front-office cart endpoint — never the reverse.
+    client_cart_snapshot: list[dict] | None = None
 
 
 class SessionStore:
@@ -189,12 +209,15 @@ class SessionStore:
                 last_turn_shows_cart_link=data.get("last_turn_shows_cart_link", False),
                 last_turn_auto_navigate_product_id=data.get("last_turn_auto_navigate_product_id"),
                 last_turn_auto_navigate_to_cart=data.get("last_turn_auto_navigate_to_cart", False),
+                last_turn_client_cart_action=data.get("last_turn_client_cart_action"),
+                last_turn_handoff_to_native_checkout=data.get("last_turn_handoff_to_native_checkout", False),
                 pending_variant_product_id=data.get("pending_variant_product_id"),
                 pending_variant_product_name=data.get("pending_variant_product_name", ""),
                 pending_action=PendingAction(**pending) if pending else None,
                 created_at=data.get("created_at", time.time()),
                 updated_at=data.get("updated_at", time.time()),
                 has_completed_order=data.get("has_completed_order", False),
+                client_cart_snapshot=data.get("client_cart_snapshot"),
             )
         return self._memory.get(session_id)
 

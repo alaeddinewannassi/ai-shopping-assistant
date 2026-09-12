@@ -46,6 +46,13 @@ class ChatRequest(BaseModel):
     # one. None for anonymous/guest browsing. See agent/dialogue.py's handle_turn and
     # PrestaShopAdapter.set_customer_context for how this changes cart/checkout attribution.
     customer_email: str | None = None
+    # Widget-read from window.prestashop.cart.products — the shopper's OWN, real cart
+    # contents (same-origin, real session cookie), as [{"variant_id": "<id_product>#<id_
+    # product_attribute>", "quantity": <int>}, ...]. Omitted entirely by a non-browser API
+    # caller (or a widget embedded outside a PrestaShop page) — that session simply keeps
+    # using a backend-tracked cart exactly as before this field existed. See
+    # ConversationSession.client_cart_snapshot's docstring for why this exists.
+    cart_snapshot: list[dict] | None = None
 
 
 class ProductLink(BaseModel):
@@ -67,9 +74,10 @@ class ChatResponse(BaseModel):
     # tenant-specific public URL needs configuring on the backend.
     product_links: list[ProductLink] = []
     # This turn was cart/checkout-adjacent — the widget offers a link to PrestaShop's own
-    # cart page (again built client-side). Doesn't guarantee the native cart UI reflects
-    # what the chatbot just did (docker/README-two-stores.md's documented gap) — it's a
-    # cross-check the shopper can use, not a claim of sync.
+    # cart page (again built client-side). For a client-cart-synced session (see
+    # ConversationSession.client_cart_snapshot), that page reflects reality: confirmed
+    # mutations are written to it via `cart_action` below, not a cart the storefront can't
+    # see (docker/README-two-stores.md).
     show_cart_link: bool = False
     # Real, automatic navigation (not just a link) — set only when exactly one product is
     # unambiguously this turn's focus, or a cart mutation was genuinely confirmed (never on
@@ -77,6 +85,15 @@ class ChatResponse(BaseModel):
     # navigating, so it never redirects if the shopper is already looking at that page.
     auto_navigate_product_id: str | None = None
     auto_navigate_to_cart: bool = False
+    # Present only for a client-cart-synced session (ChatRequest.cart_snapshot was sent) and
+    # only right after a confirmed add/update/remove — the exact instruction the widget must
+    # execute against the store's own real front-office cart endpoint. Absent (None) for
+    # every other tenant/session, which keeps mutating exactly as before this field existed.
+    cart_action: dict | None = None
+    # True only right after a confirmed checkout for a client-cart-synced session — the
+    # widget navigates to the store's own real checkout page (no order was placed here; the
+    # backend has no cart of its own left to place one against once synced).
+    auto_navigate_to_checkout: bool = False
 
 
 def _check_redis() -> str:
@@ -144,7 +161,11 @@ def chat(
     promo suggestion/apply (US4) intents are fully wired via agent/dialogue.py.
     """
     reply = handle_turn(
-        runtime.dialogue_ctx, request.session_id, request.message, customer_email=request.customer_email
+        runtime.dialogue_ctx,
+        request.session_id,
+        request.message,
+        customer_email=request.customer_email,
+        cart_snapshot=request.cart_snapshot,
     )
     session = runtime.dialogue_ctx.session_store.get_or_create(request.session_id)
     return ChatResponse(
@@ -158,6 +179,8 @@ def chat(
         show_cart_link=session.last_turn_shows_cart_link,
         auto_navigate_product_id=session.last_turn_auto_navigate_product_id,
         auto_navigate_to_cart=session.last_turn_auto_navigate_to_cart,
+        cart_action=session.last_turn_client_cart_action,
+        auto_navigate_to_checkout=session.last_turn_handoff_to_native_checkout,
     )
 
 

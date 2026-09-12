@@ -5,6 +5,17 @@ export interface ProductLink {
   name: string;
 }
 
+export interface ClientCartSnapshotRow {
+  variant_id: string;
+  quantity: number;
+}
+
+export interface ClientCartAction {
+  op: "increment" | "set" | "remove";
+  variant_id: string;
+  quantity?: number;
+}
+
 export interface ChatResponse {
   session_id: string;
   reply: string;
@@ -13,6 +24,15 @@ export interface ChatResponse {
   show_cart_link: boolean;
   auto_navigate_product_id: string | null;
   auto_navigate_to_cart: boolean;
+  // Present only for a session that has been sending cart_snapshot (below), right after a
+  // confirmed add/update/remove — the instruction to execute against the store's real
+  // front-office cart endpoint (see widget.ts's applyClientCartAction). This is what makes
+  // the confirmed mutation actually visible on the store's own cart/checkout pages, instead
+  // of only existing in a chat-tracked cart the storefront never sees.
+  cart_action: ClientCartAction | null;
+  // True only right after a confirmed checkout for a client-cart-synced session — no order
+  // was placed server-side; the widget navigates to the store's own real checkout page.
+  auto_navigate_to_checkout: boolean;
 }
 
 // A hung backend (vs. one that errors quickly) previously left the widget's input disabled
@@ -27,6 +47,7 @@ export async function sendChatMessage(
   message: string,
   tenantKey?: string,
   customerEmail?: string,
+  cartSnapshot?: ClientCartSnapshotRow[],
   timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<ChatResponse> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -36,12 +57,19 @@ export async function sendChatMessage(
   if (tenantKey) {
     headers["X-Assistant-Key"] = tenantKey;
   }
-  const body: Record<string, string> = { session_id: sessionId, message };
+  const body: Record<string, unknown> = { session_id: sessionId, message };
   // Only present when the storefront page reports a real, logged-in shopper (see widget.ts's
   // customerEmail getter) — omitted entirely for anonymous/guest browsing, which resolves to
   // the tenant's shared demo identity exactly as before (api/chat.py's ChatRequest).
   if (customerEmail) {
     body.customer_email = customerEmail;
+  }
+  // Only present when window.prestashop.cart was readable (a real PrestaShop page) — see
+  // widget.ts's readClientCartSnapshot. Omitted entirely for a non-browser API caller or a
+  // widget embedded outside a PrestaShop page, which keeps using a backend-tracked cart
+  // exactly as before this existed (src/session/store.py's client_cart_snapshot docstring).
+  if (cartSnapshot !== undefined) {
+    body.cart_snapshot = cartSnapshot;
   }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);

@@ -31,7 +31,7 @@ from src.agent.intents import (
     PromoResolutionKind,
 )
 from src.agent.llm_client import ActionCall, LLMClient
-from src.agent.pending import PendingActionError, PendingActionGate
+from src.agent.pending import PendingActionError, PendingActionGate, PromoNotSyncableError
 from src.agent.recap import (
     build_add_to_cart_recap,
     build_cart_summary,
@@ -164,6 +164,20 @@ def _record_navigation(
 
 def _cart_id_for(session: ConversationSession) -> str:
     return session.cart_id or session.session_id
+
+
+def _get_cart(ctx: DialogueContext, session: ConversationSession):
+    """Real, confirmed live bug fix (specs/003-adversarial-qa-review): reads the shopper's
+    ACTUAL cart when the adapter/session support it (see ConversationSession.client_cart_
+    snapshot's docstring), instead of a webservice-created cart PrestaShop's own front-end
+    session has never heard of. Every existing call site/test that doesn't set a client
+    snapshot (MockAdapter, or a PrestaShop tenant before the widget's first snapshot arrives)
+    keeps the prior get_cart(session)-based behavior exactly as before."""
+    if getattr(ctx.adapter, "supports_client_cart_sync", False) and session.client_cart_snapshot is not None:
+        return ctx.adapter.cart_from_snapshot(session.client_cart_snapshot)
+    cart = ctx.adapter.get_cart(_cart_id_for(session))
+    ctx.session_store.remember_cart_id(session, cart.id)
+    return cart
 
 
 def _products_by_id_for_cart(ctx: DialogueContext, cart) -> dict:
@@ -363,8 +377,7 @@ def _handle_propose_cart_line_change(
     session = ctx.session_store.get_or_create(session_id)
     action_type = "propose_remove_from_cart" if remove else "propose_update_cart"
     try:
-        cart = ctx.adapter.get_cart(_cart_id_for(session))
-        ctx.session_store.remember_cart_id(session, cart.id)
+        cart = _get_cart(ctx, session)
     except AdapterUnavailableError as exc:
         log_action(session_id, action_type, "get_cart", "unavailable", details={"error": str(exc)[:500]})
         return (
@@ -433,8 +446,7 @@ def _handle_request_checkout(ctx: DialogueContext, session_id: str) -> str:
     assert ctx.pending_gate is not None
     session = ctx.session_store.get_or_create(session_id)
     try:
-        cart = ctx.adapter.get_cart(_cart_id_for(session))
-        ctx.session_store.remember_cart_id(session, cart.id)
+        cart = _get_cart(ctx, session)
     except AdapterUnavailableError as exc:
         log_action(session_id, "request_checkout", "get_cart", "unavailable", details={"error": str(exc)[:500]})
         return (
@@ -459,8 +471,7 @@ def _handle_checkout_state_changed(ctx: DialogueContext, session_id: str) -> str
     assert ctx.pending_gate is not None
     session = ctx.session_store.get_or_create(session_id)
     try:
-        cart = ctx.adapter.get_cart(_cart_id_for(session))
-        ctx.session_store.remember_cart_id(session, cart.id)
+        cart = _get_cart(ctx, session)
     except AdapterUnavailableError as exc:
         log_action(session_id, "confirm_pending_action", "checkout", "unavailable", details={"error": str(exc)[:500]})
         return "I can't reach the store right now to re-check your cart. Please try again shortly."
@@ -525,8 +536,7 @@ def _describe_available_promos(ctx: DialogueContext, session_id: str, session: C
     """US4 Scenario 5: honestly reports when no discount currently applies, rather than
     inventing one, when the shopper asks about promos without giving a specific code."""
     try:
-        cart = ctx.adapter.get_cart(_cart_id_for(session))
-        ctx.session_store.remember_cart_id(session, cart.id)
+        cart = _get_cart(ctx, session)
     except AdapterUnavailableError as exc:
         log_action(session_id, "apply_promo", "get_cart", "unavailable", details={"error": str(exc)[:500]})
         return "I can't reach the store right now to check for promo codes. Please try again in a moment."
@@ -568,8 +578,7 @@ def _maybe_suggest_promo(ctx: DialogueContext, session_id: str, reply: str) -> s
     if session.pending_action is not None:
         return reply
     try:
-        cart = ctx.adapter.get_cart(_cart_id_for(session))
-        ctx.session_store.remember_cart_id(session, cart.id)
+        cart = _get_cart(ctx, session)
     except AdapterUnavailableError as exc:
         _logger.warning("Adapter unavailable during proactive promo suggestion for %s: %s", session_id, exc)
         return reply
@@ -598,38 +607,57 @@ def _maybe_suggest_promo(ctx: DialogueContext, session_id: str, reply: str) -> s
     return reply
 
 
-def _handle_confirm(ctx: DialogueContext, session_id: str) -> tuple[str, str | None]:
-    """Returns (reply, confirmed_action_type) — confirmed_action_type is the PendingAction's
-    own action_type ("add_cart_item"/"checkout"/...) ONLY on genuine success, None on every
-    failure/no-op path (including CartStateChangedError's re-prompt). _route_turn uses this
-    to decide whether to auto-navigate to the real cart page — never on anything short of
-    an actual, confirmed mutation."""
+@dataclass
+class ConfirmOutcome:
+    reply: str
+    # The PendingAction's own action_type ("add_cart_item"/"checkout"/...) ONLY on genuine
+    # success, None on every failure/no-op path (including CartStateChangedError's
+    # re-prompt). _route_turn uses this to decide whether to auto-navigate to the real cart
+    # page — never on anything short of an actual, confirmed mutation.
+    confirmed_action_type: str | None = None
+    # Populated only for a client-cart-synced session (see ConversationSession.
+    # client_cart_snapshot) — the instruction the widget must execute against the store's
+    # real front-office cart endpoint for this confirmed mutation to actually take effect.
+    client_cart_action: dict | None = None
+    # True only when checkout was confirmed for a client-cart-synced session — the widget
+    # hands the shopper off to the store's own real checkout page instead of an order having
+    # been placed here (see PendingActionGate.confirm()'s checkout branch).
+    handoff_to_native_checkout: bool = False
+
+
+def _handle_confirm(ctx: DialogueContext, session_id: str) -> ConfirmOutcome:
     assert ctx.pending_gate is not None
     session = ctx.session_store.get_or_create(session_id)
     pending = session.pending_action
     if pending is None:
         log_action(session_id, "confirm_pending_action", "confirm", "nothing_pending")
-        return "There's nothing pending for me to confirm right now.", None
+        return ConfirmOutcome("There's nothing pending for me to confirm right now.")
 
     try:
         result = ctx.pending_gate.confirm(session_id, pending.action_id)
     except PendingActionError:
         log_action(session_id, "confirm_pending_action", "confirm", "stale_or_missing")
-        return "That confirmation isn't valid anymore — could you tell me again what you'd like to do?", None
+        return ConfirmOutcome("That confirmation isn't valid anymore — could you tell me again what you'd like to do?")
     except AdapterUnavailableError as exc:
         # T035a: never assume success, never fall back to a cache for a mutation.
         log_action(session_id, "confirm_pending_action", "confirm", "unavailable", details={"error": str(exc)[:500]})
-        return (
+        return ConfirmOutcome(
             "I couldn't apply that change — the store is temporarily unreachable. "
             "Nothing was changed; please try again shortly."
-        ), None
+        )
     except OutOfStockError:
         log_action(session_id, "confirm_pending_action", "confirm", "out_of_stock")
-        return "Sorry, that item just went out of stock, so I couldn't complete that change.", None
+        return ConfirmOutcome("Sorry, that item just went out of stock, so I couldn't complete that change.")
     except CartStateChangedError:
         # FR-009 / US3 Scenario 4: re-validate and require a fresh confirmation instead of
         # retrying blindly or silently placing a mismatched order.
-        return _handle_checkout_state_changed(ctx, session_id), None
+        return ConfirmOutcome(_handle_checkout_state_changed(ctx, session_id))
+    except PromoNotSyncableError:
+        log_action(session_id, "confirm_pending_action", "confirm", "promo_not_syncable")
+        return ConfirmOutcome(
+            "I can't apply a discount code from chat for this store right now — you can "
+            "enter it in the discount code field at checkout instead."
+        )
 
     # details.action_type distinguishes a confirmed cart mutation from a confirmed checkout —
     # both share this same (intent, action, outcome) tuple otherwise, and the funnel query
@@ -640,6 +668,12 @@ def _handle_confirm(ctx: DialogueContext, session_id: str) -> tuple[str, str | N
     )
 
     if pending.action_type == "checkout":
+        if result.handoff_to_native_checkout:
+            return ConfirmOutcome(
+                "Taking you to checkout to complete your order.",
+                pending.action_type,
+                handoff_to_native_checkout=True,
+            )
         assert result.order is not None
         order = result.order
         # Re-fetch fresh rather than reusing the STALE `session` read at the top of this
@@ -652,14 +686,16 @@ def _handle_confirm(ctx: DialogueContext, session_id: str) -> tuple[str, str | N
         session = ctx.session_store.get_or_create(session_id)
         session.has_completed_order = True
         ctx.session_store.save(session)
-        return (
+        return ConfirmOutcome(
             f"Order placed! Your order id is {order.id}. "
-            f"Total charged: ${order.grand_total:.2f}. Thank you for shopping with us!"
-        ), pending.action_type
+            f"Total charged: ${order.grand_total:.2f}. Thank you for shopping with us!",
+            pending.action_type,
+        )
 
     if result.cart is None:
-        return "Done!", pending.action_type
-    return build_cart_summary(result.cart, _products_by_id_for_cart(ctx, result.cart)), pending.action_type
+        return ConfirmOutcome("Done!", pending.action_type)
+    reply = build_cart_summary(result.cart, _products_by_id_for_cart(ctx, result.cart))
+    return ConfirmOutcome(reply, pending.action_type, client_cart_action=result.client_cart_action)
 
 
 def _handle_decline(ctx: DialogueContext, session_id: str) -> str:
@@ -741,7 +777,12 @@ def _upsert_conversation_session(ctx: DialogueContext, session_id: str) -> None:
 
 
 def handle_turn(
-    ctx: DialogueContext, session_id: str, message: str, *, customer_email: str | None = None
+    ctx: DialogueContext,
+    session_id: str,
+    message: str,
+    *,
+    customer_email: str | None = None,
+    cart_snapshot: list[dict] | None = None,
 ) -> str:
     """Handles one conversational turn across US1 (discovery/navigation), US2 (cart
     propose/confirm/decline), US3 (checkout), and US4 (promo suggestions/apply). Any other
@@ -751,11 +792,20 @@ def handle_turn(
     window.prestashop.customer.email) mirrors onto this session every turn — set when a real
     shopper is logged in, cleared (None) for anonymous/guest or after they log out — and is
     handed to the adapter so cart/checkout attributes to that real account instead of the
-    tenant's shared demo identity (PrestaShopAdapter.set_customer_context)."""
+    tenant's shared demo identity (PrestaShopAdapter.set_customer_context).
+
+    `cart_snapshot` (api/chat.py's ChatRequest.cart_snapshot, widget-read from
+    window.prestashop.cart) mirrors onto the session every turn it's sent — see
+    ConversationSession.client_cart_snapshot's docstring for why this exists. Once a session
+    has received one, every cart read/write for it uses this real, shopper-owned cart
+    instead of a webservice-created one this backend can't keep in sync with the storefront."""
     with turn_scope(ctx.tenant_id, session_id):
         session = ctx.session_store.get_or_create(session_id)
         if session.real_customer_email != customer_email:
             session.real_customer_email = customer_email
+            ctx.session_store.save(session)
+        if cart_snapshot is not None and session.client_cart_snapshot != cart_snapshot:
+            session.client_cart_snapshot = cart_snapshot
             ctx.session_store.save(session)
         ctx.adapter.set_customer_context(session_id, customer_email)
 
@@ -827,6 +877,8 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
     # only actually navigates if window.prestashop.page says the shopper isn't already there.
     auto_navigate_product_id: str | None = None
     auto_navigate_to_cart = False
+    client_cart_action: dict | None = None
+    handoff_to_native_checkout = False
     # Which of the discovery outcome kinds this turn actually produced, if any — a SECOND
     # gate on phrase_reply below, tighter than just "the action type was read-only". A real
     # test caught this exact gap: get_product_details' CLARIFY outcome (multiple candidates,
@@ -924,7 +976,11 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         reply = _handle_apply_promo(ctx, session_id, action.parameters.get("raw_text", message))
 
     elif action.action_type == "confirm_pending_action" and ctx.pending_gate:
-        reply, confirmed_type = _handle_confirm(ctx, session_id)
+        outcome = _handle_confirm(ctx, session_id)
+        reply = outcome.reply
+        confirmed_type = outcome.confirmed_action_type
+        client_cart_action = outcome.client_cart_action
+        handoff_to_native_checkout = outcome.handoff_to_native_checkout
         if confirmed_type in {"add_cart_item", "update_cart_item", "remove_cart_item"}:
             auto_navigate_to_cart = True
 
@@ -974,6 +1030,8 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
     session.last_turn_shows_cart_link = shows_cart_link and not auto_navigate_to_cart
     session.last_turn_auto_navigate_product_id = auto_navigate_product_id
     session.last_turn_auto_navigate_to_cart = auto_navigate_to_cart
+    session.last_turn_client_cart_action = client_cart_action
+    session.last_turn_handoff_to_native_checkout = handoff_to_native_checkout
     ctx.session_store.save(session)
 
     if action.action_type == "ask_or_chat":

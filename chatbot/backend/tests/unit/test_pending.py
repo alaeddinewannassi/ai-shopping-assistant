@@ -11,7 +11,7 @@ import pytest
 
 from src.adapters.base import CartStateChangedError
 from src.adapters.mock import MockAdapter
-from src.agent.pending import MUTATING_ACTION_TYPES, PendingActionError, PendingActionGate
+from src.agent.pending import MUTATING_ACTION_TYPES, PendingActionError, PendingActionGate, PromoNotSyncableError
 from src.session.store import SessionStore
 
 
@@ -178,6 +178,136 @@ def test_confirm_executes_normally_within_the_staleness_window(gate: PendingActi
     _age_pending_action(gate, "s1", seconds=5)
 
     result = gate.confirm("s1", action.action_id)
+    assert result.cart is not None
+    assert len(result.cart.lines) == 1
+
+
+# -- Client-cart-sync (specs/003-adversarial-qa-review) ------------------------------- #
+#
+# Regression coverage for a real bug found via adversarial review: the chatbot's own
+# webservice-created cart and the shopper's real front-end session cart were completely
+# disconnected. For a session that has provided a real client_cart_snapshot, confirm() must
+# never call the adapter's own add/update/remove/checkout — those would mutate a cart the
+# storefront never sees — and must instead return an instruction for the widget to execute.
+
+
+class _ClientSyncAdapter(MockAdapter):
+    """A MockAdapter that also declares client-cart-sync support, and raises if any of the
+    mutating methods it should now be BYPASSING for a synced session are ever called."""
+
+    supports_client_cart_sync = True
+
+    def cart_from_snapshot(self, snapshot):
+        from src.adapters.base import Cart, CartLine
+
+        lines = [
+            CartLine(product_id=row["variant_id"].split("#")[0], variant_id=row["variant_id"], quantity=row["quantity"], unit_price=1.0)
+            for row in snapshot
+        ]
+        return Cart(id="client-cart", lines=lines)
+
+    def add_cart_item(self, *a, **k):
+        raise AssertionError("must not call the adapter directly for a client-synced session")
+
+    def update_cart_item(self, *a, **k):
+        raise AssertionError("must not call the adapter directly for a client-synced session")
+
+    def remove_cart_item(self, *a, **k):
+        raise AssertionError("must not call the adapter directly for a client-synced session")
+
+    def apply_promo(self, *a, **k):
+        raise AssertionError("must not call the adapter directly for a client-synced session")
+
+    def checkout(self, *a, **k):
+        raise AssertionError("must not call the adapter directly for a client-synced session")
+
+
+@pytest.fixture
+def synced_gate() -> PendingActionGate:
+    return PendingActionGate(SessionStore(redis_url=None), _ClientSyncAdapter())
+
+
+def _give_snapshot(gate: PendingActionGate, session_id: str, snapshot: list[dict]) -> None:
+    session = gate._sessions.get_or_create(session_id)
+    session.client_cart_snapshot = snapshot
+    gate._sessions.save(session)
+
+
+def test_confirmed_add_returns_a_client_cart_action_instead_of_mutating_the_adapter(
+    synced_gate: PendingActionGate,
+) -> None:
+    _give_snapshot(synced_gate, "s1", [])
+    action = synced_gate.propose(
+        "s1", "add_cart_item",
+        {"product_id": "18", "variant_id": "18#36", "quantity": 2},
+        recap_text="Add 2x Notebook?",
+    )
+    result = synced_gate.confirm("s1", action.action_id)
+
+    assert result.client_cart_action == {"op": "increment", "variant_id": "18#36", "quantity": 2}
+    assert result.cart is not None
+    assert result.cart.lines[0].quantity == 2  # predicted, from the (empty) pre-mutation snapshot
+
+
+def test_confirmed_update_reports_the_absolute_target_quantity(synced_gate: PendingActionGate) -> None:
+    _give_snapshot(synced_gate, "s1", [{"variant_id": "18#36", "quantity": 2}])
+    action = synced_gate.propose(
+        "s1", "update_cart_item", {"variant_id": "18#36", "quantity": 5}, recap_text="Set to 5?"
+    )
+    result = synced_gate.confirm("s1", action.action_id)
+
+    assert result.client_cart_action == {"op": "set", "variant_id": "18#36", "quantity": 5}
+    assert result.cart.lines[0].quantity == 5
+
+
+def test_confirmed_remove_needs_no_quantity(synced_gate: PendingActionGate) -> None:
+    _give_snapshot(synced_gate, "s1", [{"variant_id": "18#36", "quantity": 2}])
+    action = synced_gate.propose("s1", "remove_cart_item", {"variant_id": "18#36"}, recap_text="Remove it?")
+    result = synced_gate.confirm("s1", action.action_id)
+
+    assert result.client_cart_action == {"op": "remove", "variant_id": "18#36"}
+    assert result.cart.lines == []
+
+
+def test_confirmed_promo_is_declined_not_silently_applied_to_an_orphaned_cart(
+    synced_gate: PendingActionGate,
+) -> None:
+    _give_snapshot(synced_gate, "s1", [{"variant_id": "18#36", "quantity": 2}])
+    action = synced_gate.propose("s1", "apply_promo", {"code": "WELCOME10"}, recap_text="Apply WELCOME10?")
+    with pytest.raises(PromoNotSyncableError):
+        synced_gate.confirm("s1", action.action_id)
+
+
+def test_confirmed_checkout_hands_off_instead_of_placing_an_order(synced_gate: PendingActionGate) -> None:
+    _give_snapshot(synced_gate, "s1", [{"variant_id": "18#36", "quantity": 2}])
+    action = synced_gate.propose("s1", "checkout", {}, recap_text="Place your order?")
+    result = synced_gate.confirm("s1", action.action_id)
+
+    assert result.handoff_to_native_checkout is True
+    assert result.order is None
+
+
+def test_a_session_with_no_snapshot_still_uses_the_adapter_directly_even_on_a_sync_capable_adapter() -> None:
+    """A non-browser API caller (no window.prestashop, nothing to snapshot) must keep
+    getting today's backend-owned-cart behavior — client-sync is per-SESSION (has this
+    session actually provided a snapshot?), never just "is the adapter capable of it"."""
+    adapter = MockAdapter()
+
+    class _CapableButNoSnapshotAdapter(_ClientSyncAdapter):
+        def add_cart_item(self, cart_id, product_id, variant_id, quantity):
+            return adapter.add_cart_item(cart_id, product_id, variant_id, quantity)
+
+    gate = PendingActionGate(SessionStore(redis_url=None), _CapableButNoSnapshotAdapter())
+    # Deliberately never calling _give_snapshot — session.client_cart_snapshot stays None.
+    action = gate.propose(
+        "s1",
+        "add_cart_item",
+        {"product_id": "prod-tshirt-1", "variant_id": "var-tshirt-1-red-m", "quantity": 1},
+        recap_text="Add 1x Classic T-Shirt?",
+    )
+    result = gate.confirm("s1", action.action_id)
+
+    assert result.client_cart_action is None
     assert result.cart is not None
     assert len(result.cart.lines) == 1
 

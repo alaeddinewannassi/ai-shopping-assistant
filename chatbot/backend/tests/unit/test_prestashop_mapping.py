@@ -223,6 +223,55 @@ def test_get_product_handles_the_plural_wrapped_display_full_response() -> None:
     assert product.variants[0].stock_quantity == 7
 
 
+# -- cart_from_snapshot (specs/003-adversarial-qa-review: client-cart-sync) ----------- #
+#
+# Regression coverage for a real bug found via adversarial review: the chatbot's own
+# webservice-created cart and PrestaShop's real front-end session cart were completely
+# disconnected — a shopper could confirm an add via chat, be told "Your cart now has...",
+# then see an EMPTY cart on the store's own cart page. cart_from_snapshot builds a Cart from
+# the shopper's OWN browser-reported contents instead of a cart the storefront never sees.
+
+
+def test_cart_from_snapshot_builds_lines_with_a_live_looked_up_price() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/products/18":
+            return httpx.Response(200, json={"product": {"price": "12.90"}})
+        if request.url.path == "/api/combinations/36":
+            return httpx.Response(200, json={"combination": {"price": "0"}})
+        if request.url.path == "/api/specific_prices":
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected request: {request.url.path}")
+
+    adapter = _adapter_with_mock_transport(handler)
+    cart = adapter.cart_from_snapshot([{"variant_id": "18#36", "quantity": 2}])
+
+    assert len(cart.lines) == 1
+    line = cart.lines[0]
+    assert line.product_id == "18"
+    assert line.variant_id == "18#36"
+    assert line.quantity == 2
+    assert line.unit_price == 12.90
+    assert cart.subtotal == 25.80
+
+
+def test_cart_from_snapshot_ignores_a_zero_or_negative_quantity_row() -> None:
+    adapter = _adapter_with_mock_transport(
+        lambda r: (_ for _ in ()).throw(AssertionError("must not look up a dropped row's price"))
+    )
+    assert adapter.cart_from_snapshot([{"variant_id": "18#36", "quantity": 0}]).lines == []
+
+
+def test_cart_from_snapshot_skips_a_malformed_row_without_raising() -> None:
+    adapter = _adapter_with_mock_transport(
+        lambda r: (_ for _ in ()).throw(AssertionError("must not look up a malformed row's price"))
+    )
+    assert adapter.cart_from_snapshot([{"quantity": 1}]).lines == []  # missing variant_id
+
+
+def test_prestashop_adapter_declares_client_cart_sync_support() -> None:
+    assert PrestaShopAdapter.supports_client_cart_sync is True
+
+
 # -- _get's 4xx handling -------------------------------------------------------------- #
 
 

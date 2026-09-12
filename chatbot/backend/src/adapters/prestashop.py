@@ -361,6 +361,45 @@ class PrestaShopAdapter:
         id_cart = self._get_or_create_ps_cart(session_id)
         return self._read_cart(id_cart)
 
+    # True on PrestaShopAdapter, absent (falsy via getattr default) on MockAdapter and any
+    # other adapter that hasn't implemented cart_from_snapshot/build_client_cart_action —
+    # dialogue.py checks this before ever reading session.client_cart_snapshot, so every
+    # existing test and platform keeps its current, unchanged behavior.
+    supports_client_cart_sync = True
+
+    def cart_from_snapshot(self, snapshot: list[dict]) -> Cart:
+        """Builds a Cart from the shopper's OWN browser-reported cart contents
+        (ConversationSession.client_cart_snapshot — see its docstring for why this exists:
+        PrestaShop's front-end session cart and this adapter's webservice-created cart are
+        two disconnected things, and the front-end never exposes a raw cart id to reconcile
+        them). `snapshot` is a list of `{"variant_id": "<id_product>#<id_product_attribute>",
+        "quantity": <int>}` — composition/quantities come from the shopper's real session
+        (ground truth for "what's actually in the cart"); price is still looked up live here
+        rather than trusted from the client, so a stale/tampered snapshot can under-report
+        what's in the cart but can never misstate what something costs.
+        """
+        lines: list[CartLine] = []
+        for row in snapshot:
+            try:
+                id_product, id_product_attribute = _split_variant_id(str(row["variant_id"]))
+                quantity = _as_int(row.get("quantity"))
+            except (KeyError, ValueError):
+                continue
+            if quantity <= 0:
+                continue
+            unit_price = self._effective_price(id_product, id_product_attribute)
+            lines.append(
+                CartLine(
+                    product_id=str(id_product),
+                    variant_id=f"{id_product}#{id_product_attribute}",
+                    quantity=quantity,
+                    unit_price=unit_price,
+                )
+            )
+        # Not a real webservice cart id — nothing in the client-cart-sync path keys anything
+        # by this; it exists only because the Cart dataclass requires an id.
+        return Cart(id="client-cart", lines=lines)
+
     # -- Mutating: only ever called from a confirmed PendingAction ---------- #
 
     def add_cart_item(self, cart_id: str, product_id: str, variant_id: str, quantity: int) -> Cart:

@@ -6,12 +6,18 @@
  * page without clashing with the host site's CSS.
  */
 
-import { sendChatMessage, type ProductLink } from "./api";
+import { sendChatMessage, type ClientCartAction, type ClientCartSnapshotRow, type ProductLink } from "./api";
 
 interface PrestashopPageContext {
   page?: {
     page_name?: string;
     body_classes?: Record<string, boolean>;
+  };
+  cart?: {
+    products?: { id_product?: string | number; id_product_attribute?: string | number; quantity?: number }[];
+  };
+  urls?: {
+    pages?: { order?: string };
   };
 }
 
@@ -33,6 +39,83 @@ function isOnProductPage(productId: string): boolean {
 function isOnCartPage(): boolean {
   try {
     return (window as unknown as { prestashop?: PrestashopPageContext }).prestashop?.page?.page_name === "cart";
+  } catch {
+    return false;
+  }
+}
+
+function prestashopContext(): PrestashopPageContext | undefined {
+  try {
+    return (window as unknown as { prestashop?: PrestashopPageContext }).prestashop;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Real, confirmed live bug fix (specs/003-adversarial-qa-review): the chatbot's own
+ * webservice-created cart and PrestaShop's real front-end session cart were completely
+ * disconnected — confirming an add in chat never showed up on the store's own cart page.
+ * window.prestashop.cart.products (same-origin, real session cookie — already used
+ * elsewhere in this file, e.g. isOnCartPage) is the shopper's OWN real cart; this is sent
+ * with every chat request so the backend can read/report it as ground truth instead of a
+ * cart the storefront never sees. Undefined (not sent at all) when window.prestashop is
+ * absent — a non-PrestaShop embed keeps using a backend-tracked cart exactly as before. */
+function readClientCartSnapshot(): ClientCartSnapshotRow[] | undefined {
+  const products = prestashopContext()?.cart?.products;
+  if (!products) return undefined;
+  return products
+    .filter((p) => p.id_product !== undefined && p.id_product_attribute !== undefined)
+    .map((p) => ({
+      variant_id: `${p.id_product}#${p.id_product_attribute}`,
+      quantity: Number(p.quantity) || 0,
+    }));
+}
+
+/** Executes a confirmed cart mutation against PrestaShop's REAL front-office cart endpoint
+ * (same origin, the shopper's own session cookie) — the only place with legitimate access
+ * to their actual cart. Semantics verified directly against this PrestaShop version's
+ * controllers/front/CartController.php source, not guessed from trial and error:
+ * `add=1&qty=N` increments by N (the default op="up"); `add=1&qty=N&op=down` decrements by
+ * N; `delete=1` removes the line entirely. "set to an absolute quantity" isn't a supported
+ * operation, so it's expressed as a decrement/increment by the difference from the
+ * CURRENT real quantity (readClientCartSnapshot — the same data this function's caller
+ * already has). Returns true if PrestaShop reported success. */
+async function applyClientCartAction(origin: string, action: ClientCartAction): Promise<boolean> {
+  const [idProduct, idProductAttribute] = action.variant_id.split("#");
+  const params = new URLSearchParams({
+    ajax: "1",
+    action: "update",
+    id_product: idProduct,
+    id_product_attribute: idProductAttribute,
+  });
+
+  if (action.op === "remove") {
+    params.set("delete", "1");
+  } else {
+    let quantity = action.quantity ?? 0;
+    if (action.op === "set") {
+      const current =
+        readClientCartSnapshot()?.find((row) => row.variant_id === action.variant_id)?.quantity ?? 0;
+      const delta = quantity - current;
+      if (delta === 0) return true;
+      quantity = Math.abs(delta);
+      params.set("add", "1");
+      if (delta < 0) params.set("op", "down");
+    } else {
+      params.set("add", "1");
+    }
+    params.set("qty", String(quantity));
+  }
+
+  try {
+    const resp = await fetch(`${origin}/index.php?controller=cart`, {
+      method: "POST",
+      headers: { "X-Requested-With": "XMLHttpRequest" },
+      body: params,
+    });
+    if (!resp.ok) return false;
+    const data = (await resp.json()) as { success?: boolean; errors?: unknown };
+    return data.success !== false && !(Array.isArray(data.errors) && data.errors.length > 0);
   } catch {
     return false;
   }
@@ -431,9 +514,33 @@ export class AssistantChatWidget extends HTMLElement {
         show_cart_link,
         auto_navigate_product_id,
         auto_navigate_to_cart,
-      } = await sendChatMessage(this.apiBase, this.sessionId, message, this.tenantKey, this.customerEmail);
+        cart_action,
+        auto_navigate_to_checkout,
+      } = await sendChatMessage(
+        this.apiBase,
+        this.sessionId,
+        message,
+        this.tenantKey,
+        this.customerEmail,
+        readClientCartSnapshot(),
+      );
       typingEl.remove();
       this.appendMessage(reply, "assistant", needs_confirmation, product_links, show_cart_link);
+
+      // Real, confirmed live bug fix: the backend already confirmed this mutation and said
+      // so above ("Your cart now has...") — cart_action is what makes that actually TRUE on
+      // the store's own cart/checkout pages, not just in this chat transcript. Must complete
+      // before any navigation below, which does a full page load.
+      if (cart_action) {
+        const applied = await applyClientCartAction(window.location.origin, cart_action);
+        if (!applied) {
+          this.appendMessage(
+            "I couldn't update your actual cart just now — please try again in a moment.",
+            "assistant",
+          );
+          return;
+        }
+      }
 
       // Real navigation, not just a link — only for an unambiguous single-product focus or
       // a genuinely confirmed cart mutation (agent/dialogue.py's criteria), and only when
@@ -441,6 +548,10 @@ export class AssistantChatWidget extends HTMLElement {
       // and saved to history before this runs, so it's still there when the new page loads.
       if (auto_navigate_product_id && !isOnProductPage(auto_navigate_product_id)) {
         window.location.href = `${window.location.origin}/index.php?id_product=${encodeURIComponent(auto_navigate_product_id)}&controller=product`;
+        return;
+      }
+      if (auto_navigate_to_checkout) {
+        window.location.href = prestashopContext()?.urls?.pages?.order ?? `${window.location.origin}/index.php?controller=order`;
         return;
       }
       if (auto_navigate_to_cart && !isOnCartPage()) {
