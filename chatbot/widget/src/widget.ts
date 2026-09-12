@@ -44,6 +44,27 @@ function isOnCartPage(): boolean {
   }
 }
 
+/** The id of the product page the shopper is LITERALLY looking at right now, or undefined
+ * everywhere else (not a product page, or window.prestashop absent). Sent with every chat
+ * request as the backend's last-resort fallback for a product question it otherwise can't
+ * pin to one item — real, confirmed live bug: "what materials is this shirt made of?" asked
+ * on that exact shirt's page got an ambiguous multi-product match instead of an answer about
+ * the shirt actually on screen. Reads the same page_name/body_classes shape isOnProductPage
+ * already verified live, just without a specific id to check against. */
+function currentProductId(): string | undefined {
+  try {
+    const page = (window as unknown as { prestashop?: PrestashopPageContext }).prestashop?.page;
+    if (page?.page_name !== "product") return undefined;
+    for (const cls of Object.keys(page.body_classes ?? {})) {
+      const match = /^product-id-(\d+)$/.exec(cls);
+      if (match && page.body_classes?.[cls]) return match[1];
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function prestashopContext(): PrestashopPageContext | undefined {
   try {
     return (window as unknown as { prestashop?: PrestashopPageContext }).prestashop;
@@ -523,6 +544,7 @@ export class AssistantChatWidget extends HTMLElement {
         this.tenantKey,
         this.customerEmail,
         readClientCartSnapshot(),
+        currentProductId(),
       );
       typingEl.remove();
       this.appendMessage(reply, "assistant", needs_confirmation, product_links, show_cart_link);

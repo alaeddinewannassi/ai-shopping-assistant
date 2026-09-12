@@ -229,19 +229,45 @@ class DiscoveryIntentHandler:
         )
 
     def resolve_product_details(
-        self, raw_text: str, last_shown_ids: list[str] | None = None
+        self,
+        raw_text: str,
+        last_shown_ids: list[str] | None = None,
+        current_product_id: str | None = None,
     ) -> DiscoveryOutcome:
         """The shopper is asking about a SPECIFIC, already-discussed product's real
         attributes (sizes/colors/stock) — e.g. "what sizes do you have", "is it in stock".
         Resolved via the same reference/keyword logic as
         CartIntentHandler.resolve_add_to_cart (_resolve_single_product, defined in the User
         Story 2 section below but shared across both), but strictly read-only: this never
-        proposes anything, it only reports real facts already in the catalog."""
+        proposes anything, it only reports real facts already in the catalog.
+
+        `current_product_id` (widget-read from window.prestashop.page — the product page the
+        shopper is LITERALLY looking at right now, see ChatRequest.current_product_id) is the
+        fallback when keyword/pronoun resolution can't confidently name a product at all. Real,
+        confirmed live bug: asking a full-sentence question naming the product only generically
+        ("what materials is this shirt made of?" while standing on that exact shirt's page) is
+        not a bare pronoun ("it"/"this" alone), so it never matched the existing last-shown
+        pronoun path, and "shirt" alone is too generic a keyword — it fell through to an
+        ambiguous multi-product match instead of just answering about the product the shopper
+        is plainly already on. Only used when normal resolution couldn't cleanly identify one
+        product — an unambiguous keyword/pronoun match always wins, since the shopper may be
+        asking about something other than the page they happen to be on."""
         try:
             product, candidates = _resolve_single_product(self._adapter, raw_text, last_shown_ids)
         except AdapterUnavailableError as exc:
             _log_unavailable(f"product_details:{raw_text}", exc)
             return DiscoveryOutcome(kind=DiscoveryKind.UNAVAILABLE)
+
+        if product is None and current_product_id is not None:
+            try:
+                current_product = self._adapter.get_product(current_product_id)
+            except AdapterUnavailableError as exc:
+                _log_unavailable(f"product_details:{raw_text}", exc)
+                return DiscoveryOutcome(kind=DiscoveryKind.UNAVAILABLE)
+            except ProductNotFoundError:
+                current_product = None
+            if current_product is not None:
+                return DiscoveryOutcome(kind=DiscoveryKind.PRODUCT_DETAILS, products=[current_product])
 
         if product is None:
             if candidates:
@@ -284,6 +310,18 @@ def _clean_reference_term(text: str) -> str:
 
 def _value_mentioned(value: str, text_lower: str) -> bool:
     return re.search(rf"\b{re.escape(value.lower())}\b", text_lower) is not None
+
+
+def _any_attribute_value_mentioned(product: Product, text_lower: str) -> bool:
+    """True iff raw_text mentions at least one real attribute value (a size, a color, ...)
+    that this specific product actually has — used to tell a bare attribute answer ("size M,
+    color white") apart from a message that doesn't reference this product's variants at all
+    (e.g. the shopper naming a completely different product instead)."""
+    return any(
+        _value_mentioned(value, text_lower)
+        for variant in product.variants
+        for value in variant.attributes.values()
+    )
 
 
 _ORDINAL_WORDS = {"first": 0, "second": 1, "third": 2, "fourth": 3, "fifth": 4}
@@ -462,15 +500,40 @@ class CartIntentHandler:
         self._adapter = adapter
 
     def resolve_add_to_cart(
-        self, raw_text: str, last_shown_ids: list[str] | None = None
+        self,
+        raw_text: str,
+        last_shown_ids: list[str] | None = None,
+        pending_variant_product_id: str | None = None,
     ) -> CartResolution:
         """US2 Scenario 1 (resolve what to add) + Scenario 5 (out-of-stock).
 
         `last_shown_ids` (session.last_shown_product_ids, dialogue.py's own record of what
         this shopper was just shown) lets a bare pronoun ("add it") or ordinal ("the second
         one") resolve against that instead of falling through to a fresh keyword search that
-        has no idea what "it" refers to."""
+        has no idea what "it" refers to.
+
+        `pending_variant_product_id` (session.pending_variant_product_id) is the product this
+        shopper was JUST asked "which size/color did you mean?" about. Real, confirmed live
+        bug: a bare attribute answer to that question ("size M, color white" — no product name
+        at all) used to go straight to the fresh catalog-wide search below, which has no idea
+        a specific product is already the subject — it matched unrelated products (e.g. mugs
+        whose color happens to be "white") instead of resolving the answer against the product
+        actually being asked about. When the raw text mentions any real attribute VALUE of
+        that specific product, resolve directly against it — the fresh search only runs as a
+        fallback for when the shopper's reply doesn't look like an attribute answer at all
+        (e.g. they changed their mind and named a different product instead)."""
         quantity = _extract_quantity(raw_text)
+        if pending_variant_product_id is not None:
+            try:
+                pending_product = self._adapter.get_product(pending_variant_product_id)
+            except AdapterUnavailableError as exc:
+                _log_unavailable(f"add_to_cart:{raw_text}", exc)
+                return CartResolution(kind=CartResolutionKind.UNAVAILABLE)
+            except ProductNotFoundError:
+                pending_product = None
+            if pending_product is not None and _any_attribute_value_mentioned(pending_product, raw_text.lower()):
+                return self._resolve_variant_and_stock(pending_product, raw_text, quantity)
+
         try:
             product, candidates = _resolve_single_product(self._adapter, raw_text, last_shown_ids)
         except AdapterUnavailableError as exc:

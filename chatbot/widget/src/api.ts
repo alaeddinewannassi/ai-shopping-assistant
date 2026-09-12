@@ -48,6 +48,7 @@ export async function sendChatMessage(
   tenantKey?: string,
   customerEmail?: string,
   cartSnapshot?: ClientCartSnapshotRow[],
+  currentProductId?: string,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<ChatResponse> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -70,6 +71,13 @@ export async function sendChatMessage(
   // exactly as before this existed (src/session/store.py's client_cart_snapshot docstring).
   if (cartSnapshot !== undefined) {
     body.cart_snapshot = cartSnapshot;
+  }
+  // Only present when window.prestashop.page reports the shopper is on a specific product's
+  // page right now (see widget.ts's currentProductId) — the last-resort fallback the backend
+  // uses for a product question it otherwise can't pin to one item (real, confirmed live bug:
+  // "what materials is this shirt made of?" asked while looking right at that shirt's page).
+  if (currentProductId !== undefined) {
+    body.current_product_id = currentProductId;
   }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);

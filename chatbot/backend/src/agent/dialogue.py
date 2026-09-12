@@ -292,7 +292,9 @@ def _handle_propose_add_to_cart(
 ) -> str:
     assert ctx.cart_handler is not None and ctx.pending_gate is not None
     session = ctx.session_store.get_or_create(session_id)
-    resolution = ctx.cart_handler.resolve_add_to_cart(raw_text, last_shown_ids)
+    resolution = ctx.cart_handler.resolve_add_to_cart(
+        raw_text, last_shown_ids, pending_variant_product_id=session.pending_variant_product_id
+    )
 
     def _clear_pending_variant() -> None:
         if session.pending_variant_product_id is not None:
@@ -828,6 +830,7 @@ def handle_turn(
     *,
     customer_email: str | None = None,
     cart_snapshot: list[dict] | None = None,
+    current_product_id: str | None = None,
 ) -> str:
     """Handles one conversational turn across US1 (discovery/navigation), US2 (cart
     propose/confirm/decline), US3 (checkout), and US4 (promo suggestions/apply). Any other
@@ -843,7 +846,14 @@ def handle_turn(
     window.prestashop.cart) mirrors onto the session every turn it's sent — see
     ConversationSession.client_cart_snapshot's docstring for why this exists. Once a session
     has received one, every cart read/write for it uses this real, shopper-owned cart
-    instead of a webservice-created one this backend can't keep in sync with the storefront."""
+    instead of a webservice-created one this backend can't keep in sync with the storefront.
+
+    `current_product_id` (api/chat.py's ChatRequest.current_product_id, widget-read from
+    window.prestashop.page — the product page the shopper is literally looking at right now,
+    None everywhere else) is used only within this turn (never persisted on the session — the
+    widget resends it fresh every request) as the last-resort fallback for a get_product_details
+    question keyword/pronoun resolution can't otherwise pin to one product. See
+    DiscoveryIntentHandler.resolve_product_details's docstring for the live bug this fixes."""
     with turn_scope(ctx.tenant_id, session_id):
         session = ctx.session_store.get_or_create(session_id)
         if session.real_customer_email != customer_email:
@@ -854,7 +864,7 @@ def handle_turn(
             ctx.session_store.save(session)
         ctx.adapter.set_customer_context(session_id, customer_email)
 
-        reply = _route_turn(ctx, session_id, message)
+        reply = _route_turn(ctx, session_id, message, current_product_id=current_product_id)
         log_turn_completed(session_id)
         _upsert_conversation_session(ctx, session_id)
         return reply
@@ -894,7 +904,9 @@ def _build_llm_context(session: ConversationSession, ctx: DialogueContext) -> di
     return context
 
 
-def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
+def _route_turn(
+    ctx: DialogueContext, session_id: str, message: str, *, current_product_id: str | None = None
+) -> str:
     session = ctx.session_store.get_or_create(session_id)
     # Real, confirmed live bug: ChatResponse.needs_confirmation used to mean "does a
     # PendingAction exist anywhere in session state" — which stays True on every turn
@@ -988,7 +1000,9 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
         # anything). Added specifically because the LLM was otherwise misusing search_products
         # for this (rewriting the query using context instead of the shopper's own words).
         raw_text = action.parameters.get("raw_text", message)
-        outcome = ctx.discovery_handler.resolve_product_details(raw_text, session.last_shown_product_ids)
+        outcome = ctx.discovery_handler.resolve_product_details(
+            raw_text, session.last_shown_product_ids, current_product_id=current_product_id
+        )
         _record_navigation(ctx.session_store, session, outcome)
         log_action(session_id, action.action_type, "get_product_details", outcome.kind.value)
         reply = render_discovery_reply(outcome)

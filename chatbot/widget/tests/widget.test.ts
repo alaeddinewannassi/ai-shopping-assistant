@@ -666,6 +666,55 @@ describe("assistant-chat-widget", () => {
     expect(JSON.parse(requestInit.body).cart_snapshot).toBeUndefined();
   });
 
+  // Regression coverage for a real, confirmed live bug: "what materials is this shirt made
+  // of?" asked while standing right on that shirt's real storefront page got an ambiguous
+  // multi-product reply instead of an answer about the shirt actually on screen — the
+  // backend had no idea which product page the shopper was on. current_product_id is the
+  // widget's side of the fix (see api/chat.py's ChatRequest.current_product_id and
+  // DiscoveryIntentHandler.resolve_product_details).
+
+  it("reports the current product page id with every chat request", async () => {
+    vi.stubGlobal("prestashop", {
+      page: { page_name: "product", body_classes: { "product-id-42": true } },
+    });
+    const fetchMock = mockFetchRoutedByUrl({
+      "/chat": () => ({ session_id: "s1", reply: "It's 100% cotton.", needs_confirmation: false }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+    const shadow = widget.shadowRoot!;
+    const input = shadow.querySelector<HTMLInputElement>("input")!;
+    const form = shadow.querySelector<HTMLFormElement>("form")!;
+    input.value = "what materials is this shirt made of?";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const [, requestInit] = fetchMock.mock.calls[0];
+    expect(JSON.parse(requestInit.body).current_product_id).toBe("42");
+  });
+
+  it("omits current_product_id entirely when not on a product page", async () => {
+    vi.stubGlobal("prestashop", { page: { page_name: "cart" } });
+    const fetchMock = mockFetchRoutedByUrl({
+      "/chat": () => ({ session_id: "s1", reply: "Here's what I found: shoes", needs_confirmation: false }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+    const shadow = widget.shadowRoot!;
+    const input = shadow.querySelector<HTMLInputElement>("input")!;
+    const form = shadow.querySelector<HTMLFormElement>("form")!;
+    input.value = "show me shoes";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const [, requestInit] = fetchMock.mock.calls[0];
+    expect(JSON.parse(requestInit.body).current_product_id).toBeUndefined();
+  });
+
   it("executes a confirmed add against PrestaShop's real front-office cart endpoint", async () => {
     vi.stubGlobal("prestashop", { cart: { products: [] } });
     const fetchMock = mockFetchRoutedByUrl({

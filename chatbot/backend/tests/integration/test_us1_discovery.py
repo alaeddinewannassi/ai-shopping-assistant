@@ -472,3 +472,45 @@ def test_ambiguous_get_product_details_reply_is_never_handed_to_phrase_reply(
     assert "did you mean" in reply.lower()
     session = session_store.get_or_create("s17")
     assert session.last_turn_auto_navigate_product_id is None  # genuinely unresolved
+
+
+def test_get_product_details_falls_back_to_the_page_the_shopper_is_literally_on(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    """Regression test for a real, confirmed live bug: asking "what materials is this shirt
+    made of?" while standing right on that shirt's real storefront page got the SAME
+    ambiguous multi-product "did you mean" reply as the test above — a full-sentence question
+    naming the product only generically isn't a bare pronoun ("it"/"this" alone), and "shirt"
+    alone is too generic a keyword, so normal resolution couldn't pin one product down. When
+    the widget reports which product page the shopper is on (current_product_id, from
+    window.prestashop.page), that must be the fallback instead of asking them to disambiguate
+    something they're plainly already looking at."""
+    scripted = _LyingScriptedLLMClient(
+        ActionCall(action_type="get_product_details", parameters={"raw_text": "shirt jacket"})
+    )
+    ctx = _ctx(adapter, scripted, session_store)
+
+    reply = handle_turn(ctx, "s18", "shirt jacket", current_product_id="prod-tshirt-1")
+
+    assert "did you mean" not in reply.lower()
+    assert "Classic T-Shirt" in reply
+    session = session_store.get_or_create("s18")
+    assert session.last_turn_auto_navigate_product_id == "prod-tshirt-1"
+
+
+def test_get_product_details_unambiguous_match_wins_over_the_current_page(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    """current_product_id is only a last-resort fallback — a question that clearly names a
+    DIFFERENT, specific product must still resolve to that product, not the page the shopper
+    happens to be on (e.g. checking a different item's details while still on this one's
+    page)."""
+    scripted = _LyingScriptedLLMClient(
+        ActionCall(action_type="get_product_details", parameters={"raw_text": "does the blue jacket come in stock"})
+    )
+    ctx = _ctx(adapter, scripted, session_store)
+
+    reply = handle_turn(ctx, "s19", "does the blue jacket come in stock", current_product_id="prod-tshirt-1")
+
+    assert "Blue Jacket" in reply
+    assert "Classic T-Shirt" not in reply

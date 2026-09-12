@@ -398,6 +398,39 @@ def test_bare_variant_answer_resolves_against_the_product_still_being_asked_abou
     assert cart.lines[0].variant_id == "var-tshirt-1-red-m"
 
 
+def test_pending_variant_answer_naming_a_shared_word_resolves_against_the_right_product(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    """Regression test for a real, confirmed live bug (found live against PrestaShop, whose
+    real full-text search is far more liberal than a simple name/description containment
+    check): answering an open "which option did you mean?" question with just the attribute
+    ("blue") used to go straight to a fresh catalog-wide search with no idea a specific
+    product was already the subject. Reproduced here with MockAdapter by picking an attribute
+    value ("blue") that ALSO happens to be a token in a completely different product's own
+    NAME ("Blue Jacket") — the old code resolved straight to that unrelated product (the only
+    catalog-wide search hit), instead of the Classic T-Shirt the clarifying question was
+    actually about. pending_variant_product_id must be checked against the product's OWN
+    attributes before ever falling back to a catalog-wide search."""
+    ctx = _ctx(adapter, llm_client, session_store)
+
+    first_reply = handle_turn(ctx, "u21", "add the classic t-shirt")
+    assert "Which option of Classic T-Shirt did you mean" in first_reply
+    session = session_store.get_or_create("u21")
+    assert session.pending_variant_product_name == "Classic T-Shirt"
+
+    second_reply = handle_turn(ctx, "u21", "blue")
+
+    assert "Classic T-Shirt" in second_reply
+    assert "Blue Jacket" not in second_reply
+    assert "confirm" in second_reply.lower() or "yes" in second_reply.lower()
+
+    confirm_reply = handle_turn(ctx, "u21", "yes")
+    assert "Classic T-Shirt" in confirm_reply
+    cart = adapter.get_cart("u21")
+    assert len(cart.lines) == 1
+    assert cart.lines[0].variant_id == "var-tshirt-1-blue-m"
+
+
 # -- Session-write-clobber regression: a second propose mid-conversation must not silently -- #
 # -- wipe itself out before the shopper can confirm it -------------------------------------- #
 
