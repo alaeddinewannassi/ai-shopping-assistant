@@ -183,6 +183,28 @@ def test_shopper_provided_valid_code_is_applied_after_validation(
     assert cart.discount_total > 0
 
 
+def test_confirmed_promo_reply_states_the_discount_and_new_total(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore,
+    promo_rules: list[PromoStrategyRule],
+) -> None:
+    """Regression test for a real, confirmed live bug: a confirmed apply_promo's success
+    reply used the SAME generic build_cart_summary as every other mutation type, which never
+    mentioned the discount at all — the shopper got zero acknowledgment in chat that
+    anything happened, even though the store's own cart page genuinely showed it applied
+    ("Discount(s) -$3.50"). The chat reply must state the discount and new total too."""
+    ctx = _ctx(adapter, llm_client, session_store, promo_rules)
+    _add_and_confirm(ctx, "p11", "add the red classic t-shirt to my cart")
+
+    handle_turn(ctx, "p11", "apply promo code WELCOME10")
+    reply = handle_turn(ctx, "p11", "yes")
+
+    cart = adapter.get_cart("p11")
+    assert "WELCOME10" in reply
+    assert "discount" in reply.lower()
+    assert f"{cart.discount_total:.2f}" in reply
+    assert f"{cart.grand_total:.2f}" in reply
+
+
 def test_shopper_provided_invalid_code_reports_reason_clearly(
     adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore,
     promo_rules: list[PromoStrategyRule],

@@ -9,9 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.adapters.base import CartStateChangedError
+from src.adapters.base import CartStateChangedError, PromoInvalidError
 from src.adapters.mock import MockAdapter
-from src.adapters.base import PromoInvalidError
 from src.agent.pending import MUTATING_ACTION_TYPES, PendingActionError, PendingActionGate
 from src.session.store import SessionStore
 

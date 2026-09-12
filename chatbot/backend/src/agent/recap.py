@@ -37,7 +37,16 @@ def build_remove_cart_recap(product: Product, line: CartLine) -> str:
 
 
 def build_cart_summary(cart: Cart, products_by_id: dict[str, Product]) -> str:
-    """Renders the post-mutation cart state shown after a confirmed change (US2 Scenario 2)."""
+    """Renders the post-mutation cart state shown after a confirmed change (US2 Scenario 2),
+    after view_cart, and after a confirmed apply_promo.
+
+    Real, confirmed live bug: a confirmed apply_promo's success reply used this SAME
+    function (dialogue.py's _handle_confirm has one generic post-mutation reply for every
+    action type), which never mentioned the discount at all — the shopper got zero
+    acknowledgment in chat that anything happened, even though the code was genuinely
+    applied to their real cart (verified live: the store's own cart page showed "Discount(s)
+    -$3.50", but the chat reply looked byte-for-byte identical to before applying anything).
+    Mirrors build_checkout_recap's discount formatting below."""
     if not cart.lines:
         return "Your cart is now empty."
     parts = []
@@ -46,7 +55,11 @@ def build_cart_summary(cart: Cart, products_by_id: dict[str, Product]) -> str:
         name = product.name if product else line.product_id
         parts.append(f"{line.quantity} x {name} (${line.line_total:.2f})")
     summary = "; ".join(parts)
-    return f"Your cart now has: {summary}. Subtotal: ${cart.subtotal:.2f}."
+    discount_text = ""
+    if cart.discount_total:
+        code_text = f" (code {cart.applied_promo_code})" if cart.applied_promo_code else ""
+        discount_text = f" Discount{code_text}: -${cart.discount_total:.2f}. Total: ${cart.grand_total:.2f}."
+    return f"Your cart now has: {summary}. Subtotal: ${cart.subtotal:.2f}.{discount_text}"
 
 
 def build_checkout_recap(cart: Cart, products_by_id: dict[str, Product]) -> str:
