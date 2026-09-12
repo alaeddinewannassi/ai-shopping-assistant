@@ -173,13 +173,15 @@ _TOOLS: list[dict[str, Any]] = [
             "name": "get_product_details",
             "description": (
                 "The shopper is asking about a SPECIFIC product's real attributes — "
-                "available sizes/colors/variants, stock, or price — for an item you already "
-                "showed them or that they've named (e.g. \"what sizes do you have\", \"is it "
-                "in stock\", \"what colors does it come in\"). Use this INSTEAD OF "
-                "search_products when they're asking about details of something already "
-                "found, not searching for something new — search_products only matches "
-                "keywords against product names, it cannot answer a question about "
-                "attributes."
+                "available sizes/colors/variants, stock, price, materials/fabric, or what "
+                "something is made of — for an item you already showed them, that they've "
+                "named, OR the exact product page they're currently viewing (e.g. \"what "
+                "sizes do you have\", \"is it in stock\", \"what colors does it come in\", "
+                "\"what is this made of\", \"what material is this shirt\"). Use this "
+                "INSTEAD OF search_products when they're asking about details of something "
+                "already found or in view, not searching for something new — search_products "
+                "only matches keywords against product names, it cannot answer a question "
+                "about attributes."
             ),
             "parameters": {
                 "type": "object",
@@ -380,10 +382,13 @@ code named — use apply_promo with the shopper's own words as raw_text; it corr
 search_products for this — searching the catalog for the word "discount" will never find \
 anything.
 - If the shopper is asking about a specific already-shown/named product's real attributes — \
-sizes, colors, variants, stock — use get_product_details, NOT search_products. \
+sizes, colors, variants, stock, materials/fabric/composition — OR about the exact product \
+page they're currently viewing ("what is this made of", "does this come in other colors", \
+said generically with no product name), use get_product_details, NOT search_products. \
 search_products only matches keywords against product names; it cannot answer a question \
-about an item's attributes, and rewriting a question like "what sizes do you have" into a \
-new search query will not work.
+about an item's attributes, and rewriting a question like "what sizes do you have" or "what \
+material is this" into a new search query will not work — it will match unrelated products \
+that happen to share a generic word, not answer the actual question.
 - Distinguish wanting to BUY something from wanting to BROWSE/LOOK: "I want the tshirt in \
 size M", "I'll take it", "get me the blue jacket", "add the sweater" all mean the shopper \
 has decided and wants it in their cart — use propose_add_to_cart (or propose_update_cart / \
