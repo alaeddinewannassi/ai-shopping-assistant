@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from src.adapters.base import Cart, CommerceAdapter, Order
+from src.adapters.base import Cart, CartStateChangedError, CommerceAdapter, Order
 from src.session.store import PendingAction, SessionStore
 
 # Mutation types this state machine gates. Every one of these MUST have gone through
@@ -81,6 +81,25 @@ class PendingActionGate:
             )
 
         try:
+            if self.is_stale(action):
+                # FR-009/US3 Scenario 4, generalized (real, confirmed gap from adversarial
+                # review): is_stale() existed with a documented 300s window but had zero
+                # call sites anywhere — a shopper could approve a recap up to the full 1-hour
+                # session TTL later with no re-check at all. checkout already has a tested,
+                # correct re-validate-and-re-propose flow for exactly this
+                # (CartStateChangedError -> _handle_checkout_state_changed re-fetches the
+                # cart and shows a fresh recap) — reuse it here rather than executing a stale
+                # approval. Every other mutation type is safer to simply discard (existing
+                # PendingActionError handling: "that confirmation isn't valid anymore, could
+                # you tell me again?") than to guess at re-validating and re-recapping each
+                # of add/update/remove/promo individually.
+                if action.action_type == "checkout":
+                    raise CartStateChangedError(
+                        "Pending checkout confirmation is stale; a fresh recap is required."
+                    )
+                raise PendingActionError(
+                    "Pending action expired (stale confirmation window) — ask again."
+                )
             if action.action_type == "checkout":
                 order = self._adapter.checkout(self._cart_id_for(session_id))
                 # The cart just placed as an order no longer represents "the shopper's

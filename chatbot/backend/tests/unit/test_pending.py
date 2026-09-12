@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from src.adapters.base import CartStateChangedError
 from src.adapters.mock import MockAdapter
 from src.agent.pending import MUTATING_ACTION_TYPES, PendingActionError, PendingActionGate
 from src.session.store import SessionStore
@@ -108,6 +109,77 @@ def test_confirm_clears_pending_action_after_execution_no_double_confirm(
 def test_propose_rejects_unknown_action_type(gate: PendingActionGate) -> None:
     with pytest.raises(ValueError):
         gate.propose("s1", "not_a_real_action", {}, recap_text="?")
+
+
+def _age_pending_action(gate: PendingActionGate, session_id: str, seconds: float) -> None:
+    session = gate._sessions.get_or_create(session_id)
+    assert session.pending_action is not None
+    session.pending_action.created_at -= seconds
+    gate._sessions.save(session)
+
+
+def test_confirm_rejects_a_stale_non_checkout_action_without_executing_it(
+    gate: PendingActionGate,
+) -> None:
+    """Regression test for a real gap found via adversarial review: is_stale() (FR-009/US3
+    Scenario 4, a 300s staleness window) existed but had zero call sites anywhere — a
+    shopper could approve a recap arbitrarily long after it was shown (up to the full
+    session TTL) with no re-check at all. A stale non-checkout confirmation must be
+    discarded exactly like an already-invalidated one, never executed."""
+    action = gate.propose(
+        "s1",
+        "add_cart_item",
+        {"product_id": "prod-tshirt-1", "variant_id": "var-tshirt-1-red-m", "quantity": 1},
+        recap_text="Add 1x Classic T-Shirt (Red, M) — $19.99?",
+    )
+    _age_pending_action(gate, "s1", seconds=301)
+
+    with pytest.raises(PendingActionError):
+        gate.confirm("s1", action.action_id)
+
+    cart = gate._adapter.get_cart("s1")
+    assert cart.lines == [], "a stale confirmation must never execute the mutation"
+    # Spent either way (matches the finally-block guarantee for every other confirm() path).
+    with pytest.raises(PendingActionError):
+        gate.confirm("s1", action.action_id)
+
+
+def test_confirm_re_prompts_for_a_fresh_recap_on_a_stale_checkout(
+    gate: PendingActionGate,
+) -> None:
+    """checkout gets the SAME re-validate-and-re-propose treatment as a genuine cart-state
+    change (CartStateChangedError) rather than the generic "ask again" — that flow already
+    exists, is already tested (dialogue.py's _handle_checkout_state_changed), and correctly
+    shows a fresh, live recap instead of just discarding the shopper's stated intent."""
+    proposal = gate.propose(
+        "s1",
+        "add_cart_item",
+        {"product_id": "prod-tshirt-1", "variant_id": "var-tshirt-1-red-m", "quantity": 1},
+        recap_text="Add 1x Classic T-Shirt (Red, M) — $19.99?",
+    )
+    add_result = gate.confirm("s1", proposal.action_id)
+    assert add_result.cart is not None
+
+    checkout_action = gate.propose("s1", "checkout", {}, recap_text="Place your order for $19.99?")
+    _age_pending_action(gate, "s1", seconds=301)
+
+    with pytest.raises(CartStateChangedError):
+        gate.confirm("s1", checkout_action.action_id)
+
+
+def test_confirm_executes_normally_within_the_staleness_window(gate: PendingActionGate) -> None:
+    """A confirmation well within the window must not be treated as stale."""
+    action = gate.propose(
+        "s1",
+        "add_cart_item",
+        {"product_id": "prod-tshirt-1", "variant_id": "var-tshirt-1-red-m", "quantity": 1},
+        recap_text="Add 1x Classic T-Shirt (Red, M) — $19.99?",
+    )
+    _age_pending_action(gate, "s1", seconds=5)
+
+    result = gate.confirm("s1", action.action_id)
+    assert result.cart is not None
+    assert len(result.cart.lines) == 1
 
 
 def test_all_mutating_action_types_are_reachable_only_through_gate() -> None:
