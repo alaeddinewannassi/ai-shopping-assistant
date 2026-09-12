@@ -802,6 +802,41 @@ describe("assistant-chat-widget", () => {
     expect(params.get("delete")).toBe("1");
   });
 
+  it("applies a confirmed promo code via the real front-office discount endpoint", async () => {
+    // Regression coverage: applying a promo for a synced session used to be declined
+    // outright ("I can't apply a discount code from chat..."); it's now a genuine write to
+    // PrestaShop's real cart via the same controller=cart AJAX endpoint cart mutations
+    // already use, verified against CartController.php's own addDiscount branch.
+    vi.stubGlobal("prestashop", { cart: { products: [] } });
+    const fetchMock = mockFetchRoutedByUrl({
+      "/chat": () => ({
+        session_id: "s1",
+        reply: "Applied WELCOME10 — subtotal $19.12, discount -$1.91, total $17.21.",
+        needs_confirmation: false,
+        cart_action: { op: "apply_promo", code: "WELCOME10" },
+      }),
+      "controller=cart": () => ({ success: true }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+    const shadow = widget.shadowRoot!;
+    const input = shadow.querySelector<HTMLInputElement>("input")!;
+    const form = shadow.querySelector<HTMLFormElement>("form")!;
+    input.value = "yes";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const [cartUrl, cartInit] = fetchMock.mock.calls[1];
+    expect(cartUrl).toContain("controller=cart");
+    const params = new URLSearchParams(cartInit.body as string);
+    expect(params.get("addDiscount")).toBe("1");
+    expect(params.get("discount_name")).toBe("WELCOME10");
+    expect(params.get("add")).toBeNull();
+    expect(params.get("delete")).toBeNull();
+  });
+
   it("shows an error and does not navigate when the real cart write fails", async () => {
     vi.stubGlobal("prestashop", { cart: { products: [] } });
     const fetchMock = mockFetchRoutedByUrl({

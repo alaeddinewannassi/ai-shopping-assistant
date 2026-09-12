@@ -11,9 +11,12 @@ export interface ClientCartSnapshotRow {
 }
 
 export interface ClientCartAction {
-  op: "increment" | "set" | "remove";
-  variant_id: string;
+  op: "increment" | "set" | "remove" | "apply_promo";
+  // Present for every op except apply_promo.
+  variant_id?: string;
   quantity?: number;
+  // Present only for apply_promo.
+  code?: string;
 }
 
 export interface ChatResponse {

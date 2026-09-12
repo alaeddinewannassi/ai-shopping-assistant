@@ -514,3 +514,34 @@ def test_get_product_details_unambiguous_match_wins_over_the_current_page(
 
     assert "Blue Jacket" in reply
     assert "Classic T-Shirt" not in reply
+
+
+def test_ask_or_chat_reply_naming_one_product_narrows_last_shown_for_the_next_turn(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    """Regression test for a real, confirmed live bug: after a browse showed multiple
+    products, an open-ended ask_or_chat reply that itself singled out ONE of them by name
+    ("I can help you with the Blue Jacket...") left last_shown_product_ids exactly as it
+    was — still every item from the earlier browse. A follow-up like "see details" then
+    re-asked the shopper to disambiguate among ALL of them again, ignoring the one the reply
+    itself had just named."""
+    scripted_search = _ScriptedLLMClient(ActionCall(action_type="search_products", parameters={"query": ""}))
+    ctx = _ctx(adapter, scripted_search, session_store)
+    handle_turn(ctx, "s20", "show me what you have")
+    session = session_store.get_or_create("s20")
+    assert len(session.last_shown_product_ids) > 1
+
+    ctx.llm_client = _ScriptedLLMClient(
+        ActionCall(action_type="ask_or_chat", parameters={"text": "Sure! I can help you with the Blue Jacket."})
+    )
+    handle_turn(ctx, "s20", "tell me about the jacket")
+    session = session_store.get_or_create("s20")
+    assert session.last_shown_product_ids == ["prod-jacket-1"]
+
+    ctx.llm_client = _ScriptedLLMClient(
+        ActionCall(action_type="get_product_details", parameters={"raw_text": "see details"})
+    )
+    reply = handle_turn(ctx, "s20", "see details")
+
+    assert "did you mean" not in reply.lower()
+    assert "Blue Jacket" in reply

@@ -151,9 +151,10 @@ on a real PrestaShop page it can read `window.prestashop.cart` from; a non-brows
 caller keeps using a backend-tracked cart instead (see `ConversationSession.
 client_cart_snapshot`'s docstring in `chatbot/backend/src/session/store.py`).
 
-**Known gap**: applying a promo/discount code from chat is not yet synced this way — for a
-synced session, the assistant declines and points you at checkout's own discount-code field
-instead of silently discounting a cart the storefront can't see.
+**Promo codes** are synced the same way: a confirmed "apply WELCOME10" is written to
+PrestaShop's own real cart via its native discount-code AJAX endpoint (`addDiscount`), so it
+shows up on the store's own cart/checkout pages exactly like the shopper had typed it into
+checkout's own discount field themselves.
 
 ## 5. Verify in the backoffice — one login, both stores
 

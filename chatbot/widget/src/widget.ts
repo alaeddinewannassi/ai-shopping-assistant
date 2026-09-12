@@ -92,40 +92,45 @@ function readClientCartSnapshot(): ClientCartSnapshotRow[] | undefined {
     }));
 }
 
-/** Executes a confirmed cart mutation against PrestaShop's REAL front-office cart endpoint
- * (same origin, the shopper's own session cookie) — the only place with legitimate access
- * to their actual cart. Semantics verified directly against this PrestaShop version's
- * controllers/front/CartController.php source, not guessed from trial and error:
+/** Executes a confirmed cart mutation (or promo application) against PrestaShop's REAL
+ * front-office cart endpoint (same origin, the shopper's own session cookie) — the only
+ * place with legitimate access to their actual cart. Semantics verified directly against
+ * this PrestaShop version's controllers/front/CartController.php source, not guessed from
+ * trial and error:
  * `add=1&qty=N` increments by N (the default op="up"); `add=1&qty=N&op=down` decrements by
  * N; `delete=1` removes the line entirely. "set to an absolute quantity" isn't a supported
  * operation, so it's expressed as a decrement/increment by the difference from the
  * CURRENT real quantity (readClientCartSnapshot — the same data this function's caller
- * already has). Returns true if PrestaShop reported success. */
+ * already has). `addDiscount=1&discount_name=<code>` (with none of add/update/delete set)
+ * calls the store's own $cart->addCartRule() — the exact same effect as typing the code
+ * into checkout's own discount field. Returns true if PrestaShop reported success. */
 async function applyClientCartAction(origin: string, action: ClientCartAction): Promise<boolean> {
-  const [idProduct, idProductAttribute] = action.variant_id.split("#");
-  const params = new URLSearchParams({
-    ajax: "1",
-    action: "update",
-    id_product: idProduct,
-    id_product_attribute: idProductAttribute,
-  });
+  const params = new URLSearchParams({ ajax: "1", action: "update" });
 
-  if (action.op === "remove") {
-    params.set("delete", "1");
+  if (action.op === "apply_promo") {
+    params.set("addDiscount", "1");
+    params.set("discount_name", action.code ?? "");
   } else {
-    let quantity = action.quantity ?? 0;
-    if (action.op === "set") {
-      const current =
-        readClientCartSnapshot()?.find((row) => row.variant_id === action.variant_id)?.quantity ?? 0;
-      const delta = quantity - current;
-      if (delta === 0) return true;
-      quantity = Math.abs(delta);
-      params.set("add", "1");
-      if (delta < 0) params.set("op", "down");
+    const [idProduct, idProductAttribute] = (action.variant_id ?? "").split("#");
+    params.set("id_product", idProduct);
+    params.set("id_product_attribute", idProductAttribute);
+    if (action.op === "remove") {
+      params.set("delete", "1");
     } else {
-      params.set("add", "1");
+      let quantity = action.quantity ?? 0;
+      if (action.op === "set") {
+        const current =
+          readClientCartSnapshot()?.find((row) => row.variant_id === action.variant_id)?.quantity ?? 0;
+        const delta = quantity - current;
+        if (delta === 0) return true;
+        quantity = Math.abs(delta);
+        params.set("add", "1");
+        if (delta < 0) params.set("op", "down");
+      } else {
+        params.set("add", "1");
+      }
+      params.set("qty", String(quantity));
     }
-    params.set("qty", String(quantity));
   }
 
   try {

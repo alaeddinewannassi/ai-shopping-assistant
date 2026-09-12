@@ -19,6 +19,7 @@ from src.adapters.base import (
     CommerceAdapter,
     OutOfStockError,
     ProductNotFoundError,
+    PromoInvalidError,
 )
 from src.agent.intents import (
     _ORDINAL_PATTERN,
@@ -31,7 +32,7 @@ from src.agent.intents import (
     PromoResolutionKind,
 )
 from src.agent.llm_client import ActionCall, LLMClient
-from src.agent.pending import PendingActionError, PendingActionGate, PromoNotSyncableError
+from src.agent.pending import PendingActionError, PendingActionGate
 from src.agent.recap import (
     build_add_to_cart_recap,
     build_cart_summary,
@@ -160,6 +161,36 @@ def _record_navigation(
         changed = True
     if changed:
         session_store.save(session)
+
+
+def _narrow_last_shown_to_named_product(ctx: DialogueContext, session_id: str, reply_text: str) -> None:
+    """Real, confirmed live bug: an open-ended ask_or_chat reply that happens to single out
+    ONE specific already-shown product by name ("I can help you with the Hummingbird
+    notebook...") left last_shown_product_ids exactly as it was — still every item from
+    whatever was last searched/browsed several turns earlier. A follow-up like "see details"
+    then re-asked the shopper to disambiguate among ALL of them, ignoring the one the reply
+    itself had JUST singled out. Narrows to that one id — never invents or guesses a match:
+    only fires when the reply's own text contains exactly one of the REAL, already-known
+    candidates' names, checked against the live catalog, not parsed/trusted from free text
+    alone. Independent get_or_create()+save() round trip, same pattern as _record_navigation
+    above — this runs after _route_turn's top-of-function `session` was already read, and its
+    own later stale resave would otherwise silently discard this write (see that function's
+    comment on why every nested handler does its own round trip)."""
+    session = ctx.session_store.get_or_create(session_id)
+    if len(session.last_shown_product_ids) <= 1:
+        return
+    reply_lower = reply_text.lower()
+    named_ids = []
+    for product_id in session.last_shown_product_ids:
+        try:
+            product = ctx.adapter.get_product(product_id)
+        except (AdapterUnavailableError, ProductNotFoundError):
+            continue
+        if product.name.lower() in reply_lower:
+            named_ids.append(product_id)
+    if len(named_ids) == 1:
+        session.last_shown_product_ids = named_ids
+        ctx.session_store.save(session)
 
 
 def _cart_id_for(session: ConversationSession) -> str:
@@ -557,19 +588,27 @@ def _handle_apply_promo(ctx: DialogueContext, session_id: str, raw_text: str) ->
     return f"{recap} (reply 'yes' to confirm or 'no' to cancel)"
 
 
-def _promo_suggestion_recap(ctx: DialogueContext, cart, code: str, discount_amount: float) -> str:
+def _promo_suggestion_recap(
+    ctx: DialogueContext, cart, code: str, discount_amount: float, *, include_cart_summary: bool = True
+) -> str:
     """Real, confirmed live UX gap: "You qualify for a discount, apply it to your cart?"
     never said WHAT was actually in that cart — harmless back when the chatbot's own cart
     only ever held items the shopper had just added through chat, but genuinely confusing
     now that client-cart-sync means the real cart can contain items added entirely outside
     this conversation (browsed and added normally, from an earlier session, or by someone
     else on a shared device). Always state the real contents first, so the suggestion is
-    self-contained no matter how those items got there."""
+    self-contained no matter how those items got there.
+
+    `include_cart_summary=False` (only passed by _maybe_suggest_promo right after a view_cart
+    turn) skips repeating that summary — another real, confirmed live UX gap: "recap of my
+    cart" showed the cart contents once, then a SECOND bubble immediately restated the exact
+    same contents again before the discount offer. The reply this suggestion is appended to
+    already said what's in the cart; only the offer itself needs to be new."""
+    savings_line = f"You qualify for code {code}, which would save you ${discount_amount:.2f}. Apply it to your cart?"
+    if not include_cart_summary:
+        return savings_line
     cart_summary = build_cart_summary(cart, _products_by_id_for_cart(ctx, cart))
-    return (
-        f"{cart_summary} You qualify for code {code}, which would save you "
-        f"${discount_amount:.2f}. Apply it to your cart?"
-    )
+    return f"{cart_summary} {savings_line}"
 
 
 def _describe_available_promos(ctx: DialogueContext, session_id: str, session: ConversationSession) -> str:
@@ -603,10 +642,15 @@ def _describe_available_promos(ctx: DialogueContext, session_id: str, session: C
     return "I don't see any discounts available for your cart right now."
 
 
-def _maybe_suggest_promo(ctx: DialogueContext, session_id: str, reply: str) -> str:
+def _maybe_suggest_promo(
+    ctx: DialogueContext, session_id: str, reply: str, *, already_shown_cart: bool = False
+) -> str:
     """T058: proactively suggests a store-validated promo code alongside a normal reply
     (US4 Scenario 1), never surfacing a candidate the store hasn't confirmed is valid
-    (contracts/promo-strategy.md). Never overrides an in-flight PendingAction."""
+    (contracts/promo-strategy.md). Never overrides an in-flight PendingAction.
+
+    `already_shown_cart` (True only right after a view_cart turn) skips repeating the cart
+    contents in the suggestion's own recap — `reply` just stated them already."""
     if ctx.promo_rules is None or ctx.pending_gate is None:
         return reply
     # Re-fetch: any propose() made while producing `reply` (e.g. an add-to-cart proposal)
@@ -631,7 +675,9 @@ def _maybe_suggest_promo(ctx: DialogueContext, session_id: str, reply: str) -> s
             return reply
         if not validation.valid:
             continue
-        recap = _promo_suggestion_recap(ctx, cart, suggestion.code, validation.discount_amount)
+        recap = _promo_suggestion_recap(
+            ctx, cart, suggestion.code, validation.discount_amount, include_cart_summary=not already_shown_cart
+        )
         action = ctx.pending_gate.propose(session_id, "apply_promo", {"code": suggestion.code}, recap)
         log_action(
             session_id, "promo_suggestion", "suggest", "shown",
@@ -686,12 +732,14 @@ def _handle_confirm(ctx: DialogueContext, session_id: str) -> ConfirmOutcome:
         # FR-009 / US3 Scenario 4: re-validate and require a fresh confirmation instead of
         # retrying blindly or silently placing a mismatched order.
         return ConfirmOutcome(_handle_checkout_state_changed(ctx, session_id))
-    except PromoNotSyncableError:
-        log_action(session_id, "confirm_pending_action", "confirm", "promo_not_syncable")
-        return ConfirmOutcome(
-            "I can't apply a discount code from chat for this store right now — you can "
-            "enter it in the discount code field at checkout instead."
-        )
+    except PromoInvalidError as exc:
+        # The code was valid when proposed but no longer is by confirmation time (someone
+        # else used it, the cart changed, etc.) — re-validated fresh against the current
+        # cart rather than trusting the (possibly stale) proposal, same posture as the
+        # staleness/CartStateChangedError checks above.
+        code = pending.parameters.get("code", "That code")
+        log_action(session_id, "confirm_pending_action", "confirm", "promo_invalid", details={"error": str(exc)[:500]})
+        return ConfirmOutcome(f"Sorry, {code} isn't valid for your cart right now ({exc}).")
 
     # details.action_type distinguishes a confirmed cart mutation from a confirmed checkout —
     # both share this same (intent, action, outcome) tuple otherwise, and the funnel query
@@ -1068,6 +1116,7 @@ def _route_turn(
         # a conversational fallback for greetings/small talk/vague or exploratory messages.
         reply = action.parameters.get("text") or "How can I help you find something today?"
         log_action(session_id, action.action_type, "ask_or_chat", "ok")
+        _narrow_last_shown_to_named_product(ctx, session_id, reply)
 
     else:
         reply = (
@@ -1078,7 +1127,9 @@ def _route_turn(
     if action.action_type not in _ALLOW_PROMO_SUGGESTION_AFTER:
         final_reply = reply
     else:
-        final_reply = _maybe_suggest_promo(ctx, session_id, reply)
+        final_reply = _maybe_suggest_promo(
+            ctx, session_id, reply, already_shown_cart=action.action_type == "view_cart"
+        )
 
     # Re-read the freshest state right before this final save — several branches above
     # (_handle_propose_add_to_cart, PendingActionGate.propose/confirm/decline,

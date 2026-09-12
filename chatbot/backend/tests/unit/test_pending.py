@@ -11,7 +11,8 @@ import pytest
 
 from src.adapters.base import CartStateChangedError
 from src.adapters.mock import MockAdapter
-from src.agent.pending import MUTATING_ACTION_TYPES, PendingActionError, PendingActionGate, PromoNotSyncableError
+from src.adapters.base import PromoInvalidError
+from src.agent.pending import MUTATING_ACTION_TYPES, PendingActionError, PendingActionGate
 from src.session.store import SessionStore
 
 
@@ -269,12 +270,30 @@ def test_confirmed_remove_needs_no_quantity(synced_gate: PendingActionGate) -> N
     assert result.cart.lines == []
 
 
-def test_confirmed_promo_is_declined_not_silently_applied_to_an_orphaned_cart(
+def test_confirmed_promo_applies_via_the_real_front_office_discount_endpoint(
     synced_gate: PendingActionGate,
 ) -> None:
+    """Real PrestaShop CartController.php supports addDiscount the same way it supports
+    add/update/delete — applying a promo for a synced session is a genuine write to the
+    shopper's own real cart, not a write to the backend's disconnected one (which the
+    _ClientSyncAdapter.apply_promo AssertionError below would catch if this regressed)."""
     _give_snapshot(synced_gate, "s1", [{"variant_id": "18#36", "quantity": 2}])
     action = synced_gate.propose("s1", "apply_promo", {"code": "WELCOME10"}, recap_text="Apply WELCOME10?")
-    with pytest.raises(PromoNotSyncableError):
+    result = synced_gate.confirm("s1", action.action_id)
+
+    assert result.client_cart_action == {"op": "apply_promo", "code": "WELCOME10"}
+    assert result.cart is not None
+    assert result.cart.applied_promo_code == "WELCOME10"
+    assert result.cart.discount_total > 0
+
+
+def test_confirmed_promo_reports_honest_reason_when_no_longer_valid(synced_gate: PendingActionGate) -> None:
+    """Re-validated fresh at confirm time, not just trusted from proposal time — a code that
+    was valid when suggested but isn't anymore (or was never real) must never be reported as
+    applied."""
+    _give_snapshot(synced_gate, "s1", [{"variant_id": "18#36", "quantity": 2}])
+    action = synced_gate.propose("s1", "apply_promo", {"code": "FAKE99"}, recap_text="Apply FAKE99?")
+    with pytest.raises(PromoInvalidError):
         synced_gate.confirm("s1", action.action_id)
 
 

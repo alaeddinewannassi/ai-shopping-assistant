@@ -100,6 +100,24 @@ def test_cart_matching_rule_gets_proactive_suggestion_with_benefit(
     assert session.pending_action.action_type == "apply_promo"
 
 
+def test_view_cart_promo_suggestion_does_not_repeat_the_cart_contents_twice(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore,
+    promo_rules: list[PromoStrategyRule],
+) -> None:
+    """Regression test for a real, confirmed live UX bug: "recap of my cart" (view_cart)
+    showed the cart contents, then a SECOND bubble immediately restated the exact same
+    contents again before the discount offer — _promo_suggestion_recap always prefixed a
+    full cart summary, even right after a turn whose own reply already was that summary."""
+    ctx = _ctx(adapter, llm_client, session_store, promo_rules)
+    _add_and_confirm(ctx, "p10", "add the blue jacket size m to my cart")
+    _add_and_confirm(ctx, "p10", "update the blue jacket quantity to 2")  # qualifies for BIGCART15
+
+    reply = handle_turn(ctx, "p10", "what's in my cart?")
+
+    assert "BIGCART15" in reply
+    assert reply.count("Blue Jacket") == 1
+
+
 # -- Scenario 2: accepting -> store-validated before reflected in total ------ #
 
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from src.adapters.base import Cart, CartStateChangedError, CommerceAdapter, Order
+from src.adapters.base import Cart, CartStateChangedError, CommerceAdapter, Order, PromoInvalidError
 from src.session.store import ConversationSession, PendingAction, SessionStore
 
 # Mutation types this state machine gates. Every one of these MUST have gone through
@@ -72,12 +72,6 @@ class PendingActionError(Exception):
     """Raised when confirm()/decline() is attempted against a missing/stale/mismatched
     PendingAction — the caller (dialogue layer) must treat this as "nothing to confirm",
     never as an implicit approval of some other action (research.md §9.4)."""
-
-
-class PromoNotSyncableError(Exception):
-    """Raised instead of applying a promo code for a client-cart-synced session — see
-    confirm()'s apply_promo branch. The dialogue layer turns this into an honest reply
-    pointing at the store's own native checkout discount field."""
 
 
 class PendingActionGate:
@@ -162,14 +156,24 @@ class PendingActionGate:
                     self._sessions.save(fresh_session)
                 return ActionResult(action_type=action.action_type, order=order)
             if action.action_type == "apply_promo" and client_synced:
-                # Same reasoning as checkout above: applying a promo writes a cart-scoped
-                # discount to the backend's OWN (disconnected, likely-empty) cart, which
-                # would silently do nothing for the shopper's real order. Honest decline
-                # rather than a false "applied!" — PrestaShop's real checkout has its own
-                # native discount-code field.
-                raise PromoNotSyncableError(
-                    "Cannot apply a promo code to a client-synced cart from chat; the "
-                    "shopper's real checkout page has its own discount-code field."
+                # Verified against the real PrestaShop front-office controller
+                # (controllers/front/CartController.php's updateCart(), the same one already
+                # verified for the add/update/remove ops below): a POST to
+                # ?controller=cart&ajax=1&action=update&addDiscount=1&discount_name=<code>
+                # (no add/update/delete param) calls $cart->addCartRule() on the shopper's
+                # OWN real session cart — a genuine, legitimate application, not a write to
+                # the backend's disconnected cart. Re-validate against the CURRENT snapshot
+                # (never trust the proposal's now-possibly-stale validation) before handing
+                # the widget an instruction to execute.
+                code = action.parameters["code"]
+                cart = self._adapter.cart_from_snapshot(session.client_cart_snapshot or [])
+                validation = self._adapter.validate_promo_for_cart(cart, code)
+                if not validation.valid:
+                    raise PromoInvalidError(validation.reason or f"Invalid promo code: {code}")
+                cart.applied_promo_code = code
+                cart.discount_total = validation.discount_amount
+                return ActionResult(
+                    action_type=action.action_type, cart=cart, client_cart_action={"op": "apply_promo", "code": code}
                 )
             cart, client_cart_action = self._execute(session_id, action, session, client_synced)
             if cart is not None and not client_synced:
