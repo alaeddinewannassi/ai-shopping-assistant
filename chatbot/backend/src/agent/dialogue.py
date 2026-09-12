@@ -232,6 +232,37 @@ def _products_by_id_for_cart(ctx: DialogueContext, cart) -> dict:
 # even called for a turn this fires on.
 _BARE_QUANTITY_REPLY = re.compile(r"^\s*(\d+)\s*(?:please|pcs?|items?)?\s*[.!]?\s*$", re.IGNORECASE)
 
+# Real, confirmed live bug: with a pending action genuinely awaiting yes/no, a hosted LLM
+# inconsistently routed a bare "yes"/"no" reply to search_products instead of
+# confirm_pending_action/decline_pending_action — leaving the mutation stuck pending
+# indefinitely (safe, since nothing executes without an explicit, correctly-routed confirm,
+# but a real dead end for the shopper who has to keep retrying). This is the single highest-
+# stakes classification in the whole flow (Constitution Principle III's confirm gate) —
+# resolved deterministically here, the same posture as every other bare-reply override in
+# this module: the LLM isn't even asked to classify a turn this fires on, so its
+# classification reliability stops mattering for exactly the turn with the least room to be
+# wrong. Exact match after cleaning (never a substring search) — a longer message that merely
+# contains "yes" alongside its own distinct intent still needs the LLM's real judgment.
+_BARE_CONFIRM_WORDS = {
+    "yes", "yeah", "yep", "yup", "sure", "confirm", "go ahead", "do it", "please do",
+    "place the order", "apply it", "sounds good", "ok", "okay", "alright",
+}
+_BARE_DECLINE_WORDS = {"no", "nope", "nah", "cancel", "never mind", "dont", "do not", "stop"}
+
+
+def _bare_confirm_or_decline_override(session: ConversationSession, message: str) -> str | None:
+    """Returns "confirm_pending_action"/"decline_pending_action" IFF this turn is a bare
+    yes/no-style reply to a pending action genuinely awaiting one, else None (falls through
+    to normal LLM routing)."""
+    if session.pending_action is None:
+        return None
+    cleaned = re.sub(r"[^\w\s'-]", "", message.lower()).strip()
+    if cleaned in _BARE_CONFIRM_WORDS:
+        return "confirm_pending_action"
+    if cleaned in _BARE_DECLINE_WORDS:
+        return "decline_pending_action"
+    return None
+
 
 def _pending_add_quantity_override(session: ConversationSession, message: str) -> int | None:
     """Returns the shopper's requested new quantity IFF this turn is a bare-number reply to
@@ -968,8 +999,13 @@ def _route_turn(
     # prior proposal) without needing to hand-flag every branch that presents one.
     pending_action_id_before = session.pending_action.action_id if session.pending_action else None
 
+    bare_confirm_decline = _bare_confirm_or_decline_override(session, message)
     pending_quantity_override = _pending_add_quantity_override(session, message)
-    if pending_quantity_override is not None and ctx.cart_handler and ctx.pending_gate:
+    if bare_confirm_decline is not None and ctx.pending_gate:
+        # Deterministic fast path — see _bare_confirm_or_decline_override's docstring. Takes
+        # priority over every other override below: a genuine pending yes/no always wins.
+        action = ActionCall(action_type=bare_confirm_decline, parameters={})
+    elif pending_quantity_override is not None and ctx.cart_handler and ctx.pending_gate:
         # Deterministic fast path — see _pending_add_quantity_override's docstring. The LLM
         # is never even asked to classify this turn: there's nothing for it to judge.
         action = ActionCall(action_type="propose_add_to_cart", parameters={"raw_text": message})

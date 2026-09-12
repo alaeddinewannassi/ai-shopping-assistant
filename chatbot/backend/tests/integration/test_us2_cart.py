@@ -597,3 +597,38 @@ def test_bare_yes_with_a_pending_action_is_not_overridden(
 
     cart = adapter.get_cart("u25")
     assert len(cart.lines) == 1  # confirmed normally, not re-proposed
+
+
+def test_bare_yes_confirms_even_when_the_llm_would_have_misrouted_it(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    """Regression test for a real, confirmed live bug: a hosted LLM inconsistently routed a
+    bare "yes" reply to a genuinely pending confirmation as search_products instead of
+    confirm_pending_action — leaving the mutation stuck pending indefinitely, no matter how
+    many times the shopper said yes. _AlwaysSearchLLMClient always misroutes regardless of
+    input, proving _bare_confirm_or_decline_override bypasses the LLM entirely for this turn —
+    it is never even asked to classify it."""
+    ctx = _ctx(adapter, llm_client, session_store)
+    handle_turn(ctx, "u26", "add the red classic t-shirt to my cart")
+
+    ctx.llm_client = _AlwaysSearchLLMClient()
+    reply = handle_turn(ctx, "u26", "yes")
+
+    assert "couldn't find anything matching" not in reply.lower()
+    cart = adapter.get_cart("u26")
+    assert len(cart.lines) == 1
+
+
+def test_bare_no_declines_even_when_the_llm_would_have_misrouted_it(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    ctx = _ctx(adapter, llm_client, session_store)
+    handle_turn(ctx, "u27", "add the red classic t-shirt to my cart")
+
+    ctx.llm_client = _AlwaysSearchLLMClient()
+    handle_turn(ctx, "u27", "no")
+
+    cart = adapter.get_cart("u27")
+    assert cart.lines == []
+    session = session_store.get_or_create("u27")
+    assert session.pending_action is None
