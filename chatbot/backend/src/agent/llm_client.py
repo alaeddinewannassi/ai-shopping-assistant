@@ -381,6 +381,11 @@ change any fact in it: product names, prices, sizes, colors, stock status, total
 instruction to reply yes/no. Rephrase the wording and tone only, never the substance.
 - If it asks the shopper to confirm or cancel something, your rephrasing must still clearly \
 ask for that same yes/no answer — never drop or soften it into an open-ended question.
+- If the shopper's message asks about something the "Exact information" doesn't actually \
+cover (e.g. warranty terms, care/washing instructions, a measurement in a different unit, \
+shipping specifics) — say so honestly (e.g. "I don't have that specific detail, but here's \
+what I do know:") rather than silently reciting the unrelated facts as if they answered the \
+question. Never invent the missing detail itself.
 - Keep it concise — a sentence or two, not a paragraph.
 - Reply with the rephrased text only — no preamble, no quotes around it."""
 
