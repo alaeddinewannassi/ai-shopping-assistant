@@ -118,6 +118,23 @@ class SessionStore:
         session.updated_at = time.time()
         self._write(session)
 
+    def remember_cart_id(self, session: ConversationSession, cart_id: str) -> None:
+        """Persists the adapter's real cart identifier onto the session once known.
+
+        Real, confirmed live bug (found via adversarial review): PrestaShopAdapter maps its
+        own session_id -> real PrestaShop cart id purely in-memory (`_cart_id_map`), and that
+        map is rebuilt empty every time tenancy/runtime.py's short-TTL TenantRuntime cache
+        rebuilds the adapter instance (every 60s) — after which the shopper's real cart
+        becomes silently unreachable and a fresh, EMPTY one gets created on the next call,
+        making a confirmed "Your cart now has..." turn into "Your cart is empty" minutes
+        later. `ConversationSession.cart_id` exists specifically so `_cart_id_for` can hand
+        the adapter a STABLE id across rebuilds instead of the volatile session_id — this is
+        the one place that id actually gets written. A no-op once already up to date.
+        """
+        if cart_id and session.cart_id != cart_id:
+            session.cart_id = cart_id
+            self.save(session)
+
     def propose_action(
         self, session_id: str, action_type: str, parameters: dict, recap_text: str
     ) -> PendingAction:

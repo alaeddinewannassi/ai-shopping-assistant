@@ -328,6 +328,15 @@ def _handle_propose_add_to_cart(
                 f"is out of stock. In-stock options: {alt}."
             )
         return f"Sorry, {resolution.product.name} is out of stock right now, with no in-stock alternative."
+    if resolution.kind == CartResolutionKind.INSUFFICIENT_STOCK:
+        assert resolution.product is not None and resolution.variant is not None
+        _clear_pending_variant()
+        variant_desc = ", ".join(f"{k}: {v}" for k, v in resolution.variant.attributes.items())
+        return (
+            f"Sorry, {resolution.product.name} ({variant_desc}) only has "
+            f"{resolution.available_quantity} left in stock, not {resolution.quantity} — "
+            f"want me to add {resolution.available_quantity} instead, or choose something else?"
+        )
 
     assert resolution.kind == CartResolutionKind.RESOLVED
     assert resolution.product is not None and resolution.variant is not None
@@ -355,6 +364,7 @@ def _handle_propose_cart_line_change(
     action_type = "propose_remove_from_cart" if remove else "propose_update_cart"
     try:
         cart = ctx.adapter.get_cart(_cart_id_for(session))
+        ctx.session_store.remember_cart_id(session, cart.id)
     except AdapterUnavailableError as exc:
         log_action(session_id, action_type, "get_cart", "unavailable", details={"error": str(exc)[:500]})
         return (
@@ -386,6 +396,20 @@ def _handle_propose_cart_line_change(
         )
     else:
         new_quantity = resolution.quantity
+        # Same false-"out of stock" conflation as _resolve_variant_and_stock's fix (a
+        # requested quantity exceeding what's available is not the same as zero stock) — this
+        # is the sibling code path for updating an EXISTING cart line's quantity, which has
+        # no equivalent pre-flight check of its own and would otherwise only surface via the
+        # adapter's generic OutOfStockError at confirm time ("that item just went out of
+        # stock" — equally false for the same reason).
+        variant = next((v for v in product.variants if v.id == line.variant_id), None)
+        if variant is not None and variant.in_stock and variant.stock_quantity < new_quantity:
+            variant_desc = ", ".join(f"{k}: {v}" for k, v in variant.attributes.items())
+            return (
+                f"Sorry, {product.name} ({variant_desc}) only has "
+                f"{variant.stock_quantity} left in stock, not {new_quantity} — "
+                f"want me to set it to {variant.stock_quantity} instead, or leave it as is?"
+            )
         recap = build_update_cart_recap(product, line, new_quantity)
         action = ctx.pending_gate.propose(
             session_id,
@@ -410,6 +434,7 @@ def _handle_request_checkout(ctx: DialogueContext, session_id: str) -> str:
     session = ctx.session_store.get_or_create(session_id)
     try:
         cart = ctx.adapter.get_cart(_cart_id_for(session))
+        ctx.session_store.remember_cart_id(session, cart.id)
     except AdapterUnavailableError as exc:
         log_action(session_id, "request_checkout", "get_cart", "unavailable", details={"error": str(exc)[:500]})
         return (
@@ -435,6 +460,7 @@ def _handle_checkout_state_changed(ctx: DialogueContext, session_id: str) -> str
     session = ctx.session_store.get_or_create(session_id)
     try:
         cart = ctx.adapter.get_cart(_cart_id_for(session))
+        ctx.session_store.remember_cart_id(session, cart.id)
     except AdapterUnavailableError as exc:
         log_action(session_id, "confirm_pending_action", "checkout", "unavailable", details={"error": str(exc)[:500]})
         return "I can't reach the store right now to re-check your cart. Please try again shortly."
@@ -500,6 +526,7 @@ def _describe_available_promos(ctx: DialogueContext, session_id: str, session: C
     inventing one, when the shopper asks about promos without giving a specific code."""
     try:
         cart = ctx.adapter.get_cart(_cart_id_for(session))
+        ctx.session_store.remember_cart_id(session, cart.id)
     except AdapterUnavailableError as exc:
         log_action(session_id, "apply_promo", "get_cart", "unavailable", details={"error": str(exc)[:500]})
         return "I can't reach the store right now to check for promo codes. Please try again in a moment."
@@ -542,6 +569,7 @@ def _maybe_suggest_promo(ctx: DialogueContext, session_id: str, reply: str) -> s
         return reply
     try:
         cart = ctx.adapter.get_cart(_cart_id_for(session))
+        ctx.session_store.remember_cart_id(session, cart.id)
     except AdapterUnavailableError as exc:
         _logger.warning("Adapter unavailable during proactive promo suggestion for %s: %s", session_id, exc)
         return reply

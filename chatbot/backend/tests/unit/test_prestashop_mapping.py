@@ -309,6 +309,50 @@ def test_upsert_cart_row_converts_a_non_404_4xx_into_adapter_unavailable() -> No
         raise AssertionError("expected AdapterUnavailableError for a non-404 4xx response")
 
 
+# -- _get_or_create_ps_cart: cart identity surviving a fresh adapter instance ---------- #
+
+
+def test_get_or_create_ps_cart_creates_a_new_cart_for_an_unseen_session_id() -> None:
+    """The ordinary first-touch path: a session id (never a plain digit string) isn't in the
+    fresh adapter's empty _cart_id_map, so a real cart is created and the mapping cached."""
+    created = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/api/carts":
+            created["count"] += 1
+            return httpx.Response(200, json={"cart": {"id": "42"}})
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    adapter = _adapter_with_mock_transport(handler)
+    assert adapter._get_or_create_ps_cart("widget-abc123") == 42
+    assert created["count"] == 1
+    # Calling again for the SAME session, same (still-warm) adapter instance, must reuse the
+    # cached mapping rather than creating a second cart.
+    assert adapter._get_or_create_ps_cart("widget-abc123") == 42
+    assert created["count"] == 1
+
+
+def test_get_or_create_ps_cart_uses_an_already_persisted_real_cart_id_directly() -> None:
+    """Regression test for a real, confirmed live bug found via adversarial review: a fresh
+    PrestaShopAdapter instance (as built on every tenancy/runtime.py TenantRuntime rebuild,
+    every 60s) has an empty _cart_id_map — with no fix, the next call for a session whose
+    real cart was created by a DIFFERENT (now-discarded) adapter instance would silently
+    create a second, empty cart, orphaning the shopper's actual items. Once the dialogue
+    layer has persisted the real numeric id onto ConversationSession.cart_id
+    (SessionStore.remember_cart_id) and starts passing THAT instead of the session_id, this
+    fresh adapter instance must recognize it and use it directly — no new cart, no API call
+    at all."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(
+            f"must not make any request to resolve an already-known real cart id: "
+            f"{request.method} {request.url.path}"
+        )
+
+    adapter = _adapter_with_mock_transport(handler)
+    assert adapter._get_or_create_ps_cart("105") == 105
+
+
 # -- Real-shopper identity resolution (set_customer_context) -------------------------- #
 
 

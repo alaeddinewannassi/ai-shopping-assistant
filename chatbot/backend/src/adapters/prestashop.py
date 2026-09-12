@@ -561,6 +561,17 @@ class PrestaShopAdapter:
     # -- Internal: cart plumbing ---------------------------------------------- #
 
     def _get_or_create_ps_cart(self, cart_id: str) -> int:
+        # Once a real PrestaShop cart has been created for a session, the caller (dialogue
+        # layer, via SessionStore.remember_cart_id) persists its real numeric id onto
+        # ConversationSession.cart_id and passes THAT in on every later call instead of the
+        # opaque session_id — it arrives here as a plain digit string. That id is already
+        # real and durable; there is nothing to create or look up, unlike a fresh session_id.
+        # This is what makes cart identity survive `_cart_id_map` being wiped (this adapter
+        # instance, and its in-memory map, is rebuilt from scratch on every
+        # tenancy/runtime.py TenantRuntime cache refresh — the map alone does not survive
+        # that, but the persisted numeric id does).
+        if cart_id.isdigit():
+            return int(cart_id)
         id_cart = self._cart_id_map.get(cart_id)
         if id_cart is None:
             customer_id, _ = self._resolve_checkout_identity(cart_id)

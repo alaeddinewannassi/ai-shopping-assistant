@@ -83,8 +83,17 @@ class PendingActionGate:
         try:
             if action.action_type == "checkout":
                 order = self._adapter.checkout(self._cart_id_for(session_id))
+                # The cart just placed as an order no longer represents "the shopper's
+                # current cart" — clear the persisted id so the next add/get starts a fresh
+                # one, matching PrestaShopAdapter.checkout()'s own _cart_id_map cleanup.
+                session = self._sessions.get_or_create(session_id)
+                if session.cart_id is not None:
+                    session.cart_id = None
+                    self._sessions.save(session)
                 return ActionResult(action_type=action.action_type, order=order)
             cart = self._execute(session_id, action)
+            if cart is not None:
+                self._sessions.remember_cart_id(self._sessions.get_or_create(session_id), cart.id)
             return ActionResult(action_type=action.action_type, cart=cart)
         finally:
             # Whether it succeeded or raised, this PendingAction is spent — clear it so a

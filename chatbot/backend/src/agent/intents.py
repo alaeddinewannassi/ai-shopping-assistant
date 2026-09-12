@@ -429,6 +429,12 @@ class CartResolutionKind(str, Enum):
     AMBIGUOUS_VARIANT = "ambiguous_variant"
     NOT_FOUND = "not_found"
     OUT_OF_STOCK = "out_of_stock"
+    # Real, confirmed live bug (adversarial review): a request for MORE than what's in
+    # stock (e.g. 301 of an item with 300 available) was reported as OUT_OF_STOCK — "is out
+    # of stock right now, with no in-stock alternative" — which is false; the item is very
+    # much in stock, just not in the exact quantity asked for. Distinct kind so the reply can
+    # state the real available quantity instead of falsely claiming zero.
+    INSUFFICIENT_STOCK = "insufficient_stock"
     UNAVAILABLE = "unavailable"
     LINE_NOT_FOUND = "line_not_found"
 
@@ -442,6 +448,7 @@ class CartResolution:
     candidates: list[str] = field(default_factory=list)
     alternatives: list[Variant] = field(default_factory=list)
     line: Optional[CartLine] = None
+    available_quantity: int = 0
 
 
 class CartIntentHandler:
@@ -493,13 +500,21 @@ class CartIntentHandler:
                 kind=CartResolutionKind.AMBIGUOUS_VARIANT, product=product, candidates=options
             )
 
-        if not variant.in_stock or variant.stock_quantity < quantity:
+        if not variant.in_stock:
             alternatives = [v for v in product.variants if v.in_stock and v.id != variant.id]
             return CartResolution(
                 kind=CartResolutionKind.OUT_OF_STOCK,
                 product=product,
                 variant=variant,
                 alternatives=alternatives,
+            )
+        if variant.stock_quantity < quantity:
+            return CartResolution(
+                kind=CartResolutionKind.INSUFFICIENT_STOCK,
+                product=product,
+                variant=variant,
+                quantity=quantity,
+                available_quantity=variant.stock_quantity,
             )
 
         return CartResolution(
