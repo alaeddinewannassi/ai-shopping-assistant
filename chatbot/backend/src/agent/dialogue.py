@@ -275,6 +275,29 @@ def _bare_confirm_or_decline_override(session: ConversationSession, message: str
     return None
 
 
+# Real, confirmed live bug: a hosted LLM inconsistently routed a plain "what's in my cart?"
+# to search_products instead of view_cart (with query "what's in my cart", which naturally
+# matches nothing — or worse, matches unrelated products via a generic word) — same
+# reliability gap as every other bare-reply override in this module. Anchored start-to-end
+# (never a substring search), matching only canonical bare phrasings of this one specific
+# question — a longer message that happens to mention "cart" alongside its own distinct
+# intent ("add this to my cart") still needs the LLM's real judgment.
+_BARE_VIEW_CART_PATTERN = re.compile(
+    r"^(?:what'?s?\s+(?:is\s+)?in\s+my\s+cart|my\s+cart|view\s+(?:my\s+)?cart|"
+    r"show\s+(?:me\s+)?my\s+cart|(?:cart\s+)?recap(?:\s+of\s+my\s+cart)?|recap\s+my\s+cart)"
+    r"\s*[.?!]*$",
+    re.IGNORECASE,
+)
+
+
+def _bare_view_cart_override(session: ConversationSession, message: str) -> bool:
+    """True IFF this turn is a bare "what's in my cart?"-style question with nothing already
+    pending (a real pending yes/no always wins — see _bare_confirm_or_decline_override)."""
+    if session.pending_action is not None:
+        return False
+    return bool(_BARE_VIEW_CART_PATTERN.match(message.strip()))
+
+
 def _pending_add_quantity_override(session: ConversationSession, message: str) -> int | None:
     """Returns the shopper's requested new quantity IFF this turn is a bare-number reply to
     a still-open add_cart_item proposal, else None (falls through to normal LLM routing)."""
@@ -1030,6 +1053,9 @@ def _route_turn(
     elif ctx.cart_handler and ctx.pending_gate and _bare_confirmation_add_override(session, message):
         # Deterministic fast path — see _bare_confirmation_add_override's docstring.
         action = ActionCall(action_type="propose_add_to_cart", parameters={"raw_text": message})
+    elif ctx.pending_gate and _bare_view_cart_override(session, message):
+        # Deterministic fast path — see _bare_view_cart_override's docstring.
+        action = ActionCall(action_type="view_cart", parameters={})
     else:
         action = ctx.llm_client.parse_turn(
             message, context=_build_llm_context(session, ctx), session_id=session_id

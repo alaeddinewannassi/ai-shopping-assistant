@@ -632,3 +632,22 @@ def test_bare_no_declines_even_when_the_llm_would_have_misrouted_it(
     assert cart.lines == []
     session = session_store.get_or_create("u27")
     assert session.pending_action is None
+
+
+def test_bare_what_is_in_my_cart_resolves_even_when_the_llm_would_have_misrouted_it(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    """Regression test for a real, confirmed live bug: a hosted LLM inconsistently routed a
+    plain "what's in my cart?" to search_products instead of view_cart — a query with
+    "what's in my cart?" as a search term naturally finds nothing (or, live against
+    PrestaShop's more liberal full-text search, matches unrelated products). Resolved
+    deterministically, the same posture as the bare confirm/decline overrides above."""
+    ctx = _ctx(adapter, llm_client, session_store)
+    handle_turn(ctx, "u28", "add the red classic t-shirt to my cart")
+    handle_turn(ctx, "u28", "yes")
+
+    ctx.llm_client = _AlwaysSearchLLMClient()
+    reply = handle_turn(ctx, "u28", "what's in my cart?")
+
+    assert "couldn't find anything matching" not in reply.lower()
+    assert "Classic T-Shirt" in reply
