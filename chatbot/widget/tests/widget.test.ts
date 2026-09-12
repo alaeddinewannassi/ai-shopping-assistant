@@ -259,15 +259,18 @@ describe("assistant-chat-widget", () => {
     let originalLocation: Location;
     let setHref: ReturnType<typeof vi.fn>;
 
+    let reloadSpy: ReturnType<typeof vi.fn>;
+
     beforeEach(() => {
       // jsdom doesn't implement real navigation — replace window.location with a spy-able
       // stand-in so we can assert what the widget tried to navigate to, without jsdom's
       // "Not implemented: navigation" error.
       originalLocation = window.location;
       setHref = vi.fn();
+      reloadSpy = vi.fn();
       Object.defineProperty(window, "location", {
         configurable: true,
-        value: { origin: originalLocation.origin, set href(v: string) { setHref(v); } },
+        value: { origin: originalLocation.origin, set href(v: string) { setHref(v); }, reload: reloadSpy },
       });
     });
 
@@ -390,6 +393,42 @@ describe("assistant-chat-widget", () => {
       await vi.waitFor(() => {
         expect(shadow.querySelectorAll(".message.assistant").length).toBe(1);
       });
+      expect(setHref).not.toHaveBeenCalled();
+    });
+
+    it("reloads the page when a confirmed cart mutation lands while already on the cart page", async () => {
+      // Regression test for a real, confirmed live bug: removing an item via chat while
+      // already looking at the store's own cart page genuinely succeeds (the real
+      // front-office write goes through), but that page is static server-rendered HTML —
+      // its header badge, line items, and totals stay stale until something refreshes it.
+      // The "navigate to cart" path above only fires when NOT already there, so this exact
+      // case needs its own explicit reload.
+      vi.stubGlobal("prestashop", { page: { page_name: "cart" }, cart: { products: [] } });
+      const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (String(url).includes("controller=cart")) {
+          return Promise.resolve({ ok: true, json: async () => ({ success: true }) });
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            session_id: "s1",
+            reply: "Your cart is now empty.",
+            needs_confirmation: false,
+            cart_action: { op: "remove", variant_id: "18#36" },
+          }),
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const widget = document.createElement("assistant-chat-widget");
+      document.body.appendChild(widget);
+      const shadow = widget.shadowRoot!;
+      const input = shadow.querySelector<HTMLInputElement>("input")!;
+      const form = shadow.querySelector<HTMLFormElement>("form")!;
+      input.value = "yes";
+      form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+      await vi.waitFor(() => expect(reloadSpy).toHaveBeenCalled());
       expect(setHref).not.toHaveBeenCalled();
     });
   });

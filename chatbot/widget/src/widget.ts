@@ -540,6 +540,16 @@ export class AssistantChatWidget extends HTMLElement {
           );
           return;
         }
+        // Real, confirmed live bug: the mutation above genuinely succeeds even when the
+        // shopper is already looking at the store's own cart page — but that page is
+        // static server-rendered HTML from whenever it loaded, so its header badge, line
+        // items, and totals stay stale until something refreshes it. The navigation checks
+        // below only fire when the shopper ISN'T already on the destination page, so this
+        // exact case (already there) would otherwise never be told to catch up.
+        if (isOnCartPage()) {
+          window.location.reload();
+          return;
+        }
       }
 
       // Real navigation, not just a link — only for an unambiguous single-product focus or
