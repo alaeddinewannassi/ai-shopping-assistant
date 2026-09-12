@@ -198,6 +198,37 @@ def test_promo_suggestion_states_the_real_cart_contents_even_when_added_outside_
     assert "Blue Jacket" in reply  # the real cart contents, not just "your cart"
 
 
+def test_view_cart_reflects_a_discount_already_active_on_the_real_cart() -> None:
+    """Regression test for a real, confirmed live bug: cart_from_snapshot only ever knows
+    about line items, so a discount already active on the real cart (applied via native
+    checkout, or via a chat confirmation on an EARLIER turn — the very next turn already
+    forgot it, since each one rebuilds the Cart from the snapshot alone) was invisible to
+    view_cart, and a still-qualifying rule kept getting proactively re-suggested even though
+    the shopper had already applied it — a confusing "you qualify for a discount!" for a
+    discount they're already getting."""
+    from src.promo.strategy import PromoStrategyRule
+
+    adapter = _ClientSyncAdapter()
+    session_store = SessionStore(redis_url=None)
+    llm_client = _ScriptedLLMClient(ActionCall(action_type="view_cart", parameters={}))
+    ctx = _ctx(adapter, llm_client, session_store)
+    ctx.promo_rules = [
+        PromoStrategyRule(rule_id="welcome", condition="first_order and subtotal > 0", target_code="WELCOME10", priority=5)
+    ]
+
+    reply = handle_turn(
+        ctx, "s6", "what's in my cart",
+        cart_snapshot=[{"variant_id": "prod-tshirt-1#var-tshirt-1-red-m", "quantity": 1}],
+        cart_discount={"code": "WELCOME10", "amount": 2.0},
+    )
+
+    assert "WELCOME10" in reply
+    assert "discount" in reply.lower()
+    assert "qualify" not in reply.lower()  # already applied — never re-suggested
+    session = session_store.get_or_create("s6")
+    assert session.pending_action is None
+
+
 def test_confirmed_checkout_hands_off_to_native_checkout_for_a_synced_session() -> None:
     adapter = _ClientSyncAdapter()
     session_store = SessionStore(redis_url=None)

@@ -15,6 +15,8 @@ interface PrestashopPageContext {
   };
   cart?: {
     products?: { id_product?: string | number; id_product_attribute?: string | number; quantity?: number }[];
+    subtotals?: { discounts?: { amount?: number } };
+    vouchers?: { added?: Record<string, { code?: string }> };
   };
   urls?: {
     pages?: { order?: string };
@@ -90,6 +92,24 @@ function readClientCartSnapshot(): ClientCartSnapshotRow[] | undefined {
       variant_id: `${p.id_product}#${p.id_product_attribute}`,
       quantity: Number(p.quantity) || 0,
     }));
+}
+
+/** Real, confirmed live bug: a synced cart's discount/voucher state was invisible to the
+ * backend (cart_from_snapshot only ever knows about line items) — a promo applied via
+ * native checkout was never reflected back in chat, AND a promo applied via chat itself
+ * looked freshly gone again on the very next turn (each one rebuilds the Cart from the
+ * snapshot alone, with no memory of it), causing a confusing repeat "you qualify for
+ * WELCOME10" suggestion for a code already active. window.prestashop.cart.subtotals.
+ * discounts.amount and .vouchers.added are PrestaShop's own already-computed real totals —
+ * read fresh with every request, so this stays correct regardless of how the discount got
+ * there. Undefined when window.prestashop is absent or no discount is currently active. */
+function readClientCartDiscount(): { code: string; amount: number } | undefined {
+  const cart = prestashopContext()?.cart;
+  const amount = Number(cart?.subtotals?.discounts?.amount) || 0;
+  if (amount <= 0) return undefined;
+  const added = Object.values(cart?.vouchers?.added ?? {});
+  const code = added[0]?.code ?? "";
+  return { code, amount };
 }
 
 /** Executes a confirmed cart mutation (or promo application) against PrestaShop's REAL
@@ -443,15 +463,44 @@ export class AssistantChatWidget extends HTMLElement {
     }
   }
 
-  /** DOM-only — renders one message bubble without touching stored history. Used both by
+  /** DOM-only — renders one message, possibly as several bubbles. Used both by
    * appendMessage() (a genuinely new message) and connectedCallback() (replaying history
-   * already in storage, which must not be re-saved as if it were new). */
+   * already in storage, which must not be re-saved as if it were new).
+   *
+   * Real, confirmed live bug: a proactive promo suggestion appended to an unrelated,
+   * substantial reply (e.g. a multi-product search result) rendered as ONE "Needs your
+   * confirmation" bubble containing both — visually implying the whole thing (products with
+   * nothing to confirm included) needed a yes/no answer. dialogue.py joins the two parts
+   * with a blank line specifically so this can be told apart from a single, atomic
+   * confirmation prompt (which never contains one, since every deterministic recap template
+   * is built from "; "-joined single-line parts) — split on it and only badge, and only
+   * apply product/cart links to, the parts they actually belong to. */
   private renderMessage(
     text: string,
     role: "user" | "assistant",
     confirm: boolean,
     productLinks: ProductLink[] = [],
     showCartLink = false,
+  ): void {
+    const parts = confirm ? text.split("\n\n") : [text];
+    parts.forEach((part, i) => {
+      const isLast = i === parts.length - 1;
+      this.renderMessagePart(
+        part,
+        role,
+        confirm && isLast,
+        i === 0 ? productLinks : [],
+        i === 0 ? showCartLink : false,
+      );
+    });
+  }
+
+  private renderMessagePart(
+    text: string,
+    role: "user" | "assistant",
+    confirm: boolean,
+    productLinks: ProductLink[],
+    showCartLink: boolean,
   ): void {
     const el = document.createElement("div");
     el.className = `message ${role}${confirm ? " confirm" : ""}`;
@@ -549,6 +598,7 @@ export class AssistantChatWidget extends HTMLElement {
         this.tenantKey,
         this.customerEmail,
         readClientCartSnapshot(),
+        readClientCartDiscount(),
         currentProductId(),
       );
       typingEl.remove();

@@ -110,6 +110,16 @@ class ConversationSession:
     # confirmed mutation as an instruction (dialogue.py's _client_cart_action) for the widget
     # to execute against the store's real front-office cart endpoint — never the reverse.
     client_cart_snapshot: list[dict] | None = None
+    # Real, confirmed live bug: a synced cart's discount/voucher state is invisible to
+    # cart_from_snapshot (it only ever knows about line items) — so a promo applied via
+    # native checkout was never reflected back in chat, AND a promo applied via chat itself
+    # looked freshly gone again on the very next turn (view_cart, a new suggestion) because
+    # each turn rebuilds the Cart from the snapshot alone, with no memory of it. The widget
+    # reads window.prestashop.cart.subtotals.discounts/vouchers — PrestaShop's own real,
+    # already-computed totals — and reports it here every turn, the same "browser is the only
+    # place with legitimate access to the real cart" trust model as client_cart_snapshot
+    # above. {"code": str, "amount": float} or None when no discount is currently active.
+    client_cart_discount: dict | None = None
 
 
 class SessionStore:
@@ -227,6 +237,7 @@ class SessionStore:
                 updated_at=data.get("updated_at", time.time()),
                 has_completed_order=data.get("has_completed_order", False),
                 client_cart_snapshot=data.get("client_cart_snapshot"),
+                client_cart_discount=data.get("client_cart_discount"),
             )
         return self._memory.get(session_id)
 

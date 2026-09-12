@@ -205,7 +205,18 @@ def _get_cart(ctx: DialogueContext, session: ConversationSession):
     snapshot (MockAdapter, or a PrestaShop tenant before the widget's first snapshot arrives)
     keeps the prior get_cart(session)-based behavior exactly as before."""
     if getattr(ctx.adapter, "supports_client_cart_sync", False) and session.client_cart_snapshot is not None:
-        return ctx.adapter.cart_from_snapshot(session.client_cart_snapshot)
+        cart = ctx.adapter.cart_from_snapshot(session.client_cart_snapshot)
+        # Real, confirmed live bug: cart_from_snapshot only ever knows about line items, so
+        # a discount already active on the real cart (applied via native checkout, OR via a
+        # chat confirmation from an EARLIER turn — the very next turn already forgot it, since
+        # each one rebuilds this Cart fresh) was invisible here — view_cart/promo-suggestion
+        # logic saw a permanently undiscounted cart and kept re-suggesting a code already
+        # applied. session.client_cart_discount (widget-read from PrestaShop's own real,
+        # already-computed subtotals.discounts/vouchers) is the ground truth every single time.
+        if session.client_cart_discount:
+            cart.applied_promo_code = session.client_cart_discount.get("code")
+            cart.discount_total = session.client_cart_discount.get("amount", 0.0) or 0.0
+        return cart
     cart = ctx.adapter.get_cart(_cart_id_for(session))
     ctx.session_store.remember_cart_id(session, cart.id)
     return cart
@@ -909,6 +920,7 @@ def handle_turn(
     *,
     customer_email: str | None = None,
     cart_snapshot: list[dict] | None = None,
+    cart_discount: dict | None = None,
     current_product_id: str | None = None,
 ) -> str:
     """Handles one conversational turn across US1 (discovery/navigation), US2 (cart
@@ -927,6 +939,9 @@ def handle_turn(
     has received one, every cart read/write for it uses this real, shopper-owned cart
     instead of a webservice-created one this backend can't keep in sync with the storefront.
 
+    `cart_discount` (api/chat.py's ChatRequest.cart_discount) mirrors onto the session the
+    same way — see ConversationSession.client_cart_discount's docstring for why this exists.
+
     `current_product_id` (api/chat.py's ChatRequest.current_product_id, widget-read from
     window.prestashop.page — the product page the shopper is literally looking at right now,
     None everywhere else) is used only within this turn (never persisted on the session — the
@@ -940,6 +955,9 @@ def handle_turn(
             ctx.session_store.save(session)
         if cart_snapshot is not None and session.client_cart_snapshot != cart_snapshot:
             session.client_cart_snapshot = cart_snapshot
+            ctx.session_store.save(session)
+        if session.client_cart_discount != cart_discount:
+            session.client_cart_discount = cart_discount
             ctx.session_store.save(session)
         ctx.adapter.set_customer_context(session_id, customer_email)
 

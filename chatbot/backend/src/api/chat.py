@@ -53,6 +53,11 @@ class ChatRequest(BaseModel):
     # using a backend-tracked cart exactly as before this field existed. See
     # ConversationSession.client_cart_snapshot's docstring for why this exists.
     cart_snapshot: list[dict] | None = None
+    # Widget-read from window.prestashop.cart.subtotals.discounts/vouchers — the shopper's
+    # OWN real, already-computed discount state ({"code": str, "amount": float}), or None
+    # when no discount is currently active. See ConversationSession.client_cart_discount's
+    # docstring for why this exists.
+    cart_discount: dict | None = None
     # Widget-read from window.prestashop.page — the real product id of the page the shopper is
     # literally looking at right now, None everywhere else (not a product page, or a widget
     # embedded outside PrestaShop). Used only as agent/dialogue.py's last-resort fallback when
@@ -172,6 +177,7 @@ def chat(
         request.message,
         customer_email=request.customer_email,
         cart_snapshot=request.cart_snapshot,
+        cart_discount=request.cart_discount,
         current_product_id=request.current_product_id,
     )
     session = runtime.dialogue_ctx.session_store.get_or_create(request.session_id)

@@ -103,6 +103,54 @@ describe("assistant-chat-widget", () => {
     expect(shadow.querySelector(".badge")?.textContent).toContain("confirmation");
   });
 
+  it("splits a proactive promo suggestion from an unrelated reply into separate bubbles", async () => {
+    // Regression test for a real, confirmed live bug: a promo suggestion appended to a
+    // substantial, unrelated reply (e.g. a multi-product search result) rendered as ONE
+    // "Needs your confirmation" bubble containing both — visually implying the whole thing,
+    // products included, needed a yes/no answer. dialogue.py joins the two parts with a
+    // blank line specifically so the widget can tell them apart and only badge the part that
+    // actually needs a yes/no; product links belong to the first (unrelated) part only.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        session_id: "s1",
+        reply:
+          "Here's what I found: Classic T-Shirt ($19.99); Blue Jacket ($89.99).\n\n" +
+          "Your cart now has: 1 x Classic T-Shirt ($19.99). Subtotal: $19.99. You qualify " +
+          "for code WELCOME10, which would save you $2.00. Apply it to your cart? " +
+          "(reply 'yes' to confirm or 'no' to cancel)",
+        needs_confirmation: true,
+        product_links: [
+          { id: "prod-tshirt-1", name: "Classic T-Shirt" },
+          { id: "prod-jacket-1", name: "Blue Jacket" },
+        ],
+        show_cart_link: false,
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+    const shadow = widget.shadowRoot!;
+    const input = shadow.querySelector<HTMLInputElement>("input")!;
+    const form = shadow.querySelector<HTMLFormElement>("form")!;
+    input.value = "show me shirts and jackets";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await vi.waitFor(() => {
+      expect(shadow.querySelectorAll(".message.assistant")).toHaveLength(2);
+    });
+    const [first, second] = shadow.querySelectorAll(".message.assistant");
+    expect(first.textContent).toContain("Here's what I found");
+    expect(first.classList.contains("confirm")).toBe(false);
+    expect(first.querySelectorAll(".links a")).toHaveLength(2);
+
+    expect(second.textContent).toContain("WELCOME10");
+    expect(second.classList.contains("confirm")).toBe(true);
+    expect(second.querySelector(".badge")?.textContent).toContain("confirmation");
+    expect(second.querySelectorAll(".links a")).toHaveLength(0);
+  });
+
   it("sends X-Assistant-Key when a tenant-key attribute is set", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

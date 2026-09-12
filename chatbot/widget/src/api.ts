@@ -10,6 +10,11 @@ export interface ClientCartSnapshotRow {
   quantity: number;
 }
 
+export interface ClientCartDiscount {
+  code: string;
+  amount: number;
+}
+
 export interface ClientCartAction {
   op: "increment" | "set" | "remove" | "apply_promo";
   // Present for every op except apply_promo.
@@ -51,6 +56,7 @@ export async function sendChatMessage(
   tenantKey?: string,
   customerEmail?: string,
   cartSnapshot?: ClientCartSnapshotRow[],
+  cartDiscount?: ClientCartDiscount,
   currentProductId?: string,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<ChatResponse> {
@@ -74,6 +80,12 @@ export async function sendChatMessage(
   // exactly as before this existed (src/session/store.py's client_cart_snapshot docstring).
   if (cartSnapshot !== undefined) {
     body.cart_snapshot = cartSnapshot;
+  }
+  // Only present when a discount is currently active on the real cart — see widget.ts's
+  // readClientCartDiscount. Omitted (never just {amount: 0}) once a code is removed, so the
+  // backend's "no discount" default applies exactly the same as if one had never existed.
+  if (cartDiscount !== undefined) {
+    body.cart_discount = cartDiscount;
   }
   // Only present when window.prestashop.page reports the shopper is on a specific product's
   // page right now (see widget.ts's currentProductId) — the last-resort fallback the backend
