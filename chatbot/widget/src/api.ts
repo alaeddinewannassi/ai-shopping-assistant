@@ -15,12 +15,19 @@ export interface ChatResponse {
   auto_navigate_to_cart: boolean;
 }
 
+// A hung backend (vs. one that errors quickly) previously left the widget's input disabled
+// forever — handleSend()'s try/catch/finally never runs until the fetch itself settles, so
+// nothing here means nothing anywhere. Aborting after a bound turns a silent hang into the
+// same friendly error path a real network failure already takes.
+const DEFAULT_TIMEOUT_MS = 20_000;
+
 export async function sendChatMessage(
   apiBase: string,
   sessionId: string,
   message: string,
   tenantKey?: string,
   customerEmail?: string,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<ChatResponse> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   // Sent only when the embed sets a tenant-key attribute (specs/002-backoffice-analytics
@@ -36,13 +43,20 @@ export async function sendChatMessage(
   if (customerEmail) {
     body.customer_email = customerEmail;
   }
-  const resp = await fetch(`${apiBase}/chat`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
-  if (!resp.ok) {
-    throw new Error(`Assistant service returned ${resp.status}`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(`${apiBase}/chat`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      throw new Error(`Assistant service returned ${resp.status}`);
+    }
+    return (await resp.json()) as ChatResponse;
+  } finally {
+    clearTimeout(timeout);
   }
-  return (await resp.json()) as ChatResponse;
 }

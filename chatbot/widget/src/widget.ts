@@ -71,8 +71,8 @@ const STYLE = `
   .panel {
     display: none;
     flex-direction: column;
-    width: 320px;
-    height: 420px;
+    width: min(320px, calc(100vw - 24px));
+    height: min(420px, calc(100vh - 100px));
     margin-bottom: 12px;
     border-radius: 12px;
     background: #fff;
@@ -105,6 +105,7 @@ const STYLE = `
   .message.user { background: #e6f0ff; margin-left: 40px; text-align: right; }
   .message.assistant { background: #f2f2f2; margin-right: 40px; }
   .message.assistant.confirm { background: #fff6da; border: 1px solid #e0c46c; }
+  .message.typing { background: #f2f2f2; margin-right: 40px; font-style: italic; color: #666; }
   .badge { display: block; font-size: 11px; font-weight: 600; color: #8a6d00; margin-bottom: 4px; }
   .links { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
   .links a { color: #2563eb; font-size: 13px; text-decoration: none; }
@@ -139,6 +140,7 @@ export class AssistantChatWidget extends HTMLElement {
   private messagesEl!: HTMLDivElement;
   private inputEl!: HTMLInputElement;
   private buttonEl!: HTMLButtonElement;
+  private launcherEl!: HTMLButtonElement;
   private messageHistory: StoredMessage[];
 
   constructor() {
@@ -188,6 +190,32 @@ export class AssistantChatWidget extends HTMLElement {
     }
   }
 
+  private get openStorageKey(): string {
+    return `assistant-widget-open-${this.sessionId}`;
+  }
+
+  // Real bug found via adversarial UX review: confirming a cart action navigates the
+  // shopper to a new page (auto_navigate_to_cart) — a real, full page load, so the panel
+  // resets to closed even though the shopper was mid-conversation and just typed "yes". The
+  // reply that answers them is still in messageHistory, but invisible until they notice the
+  // collapsed launcher and reopen it. Persisted the same way session-scoped history already
+  // is, so a fresh page load can restore whichever state the shopper actually left it in.
+  private loadOpenState(): boolean {
+    try {
+      return window.localStorage.getItem(this.openStorageKey) === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  private saveOpenState(open: boolean): void {
+    try {
+      window.localStorage.setItem(this.openStorageKey, open ? "1" : "0");
+    } catch {
+      // Storage full/unavailable - the open/closed state just won't survive navigation.
+    }
+  }
+
   connectedCallback(): void {
     const root = this.attachShadow({ mode: "open" });
     const style = document.createElement("style");
@@ -195,6 +223,8 @@ export class AssistantChatWidget extends HTMLElement {
 
     const panel = document.createElement("div");
     panel.className = "panel";
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-label", "Chat with us");
 
     const header = document.createElement("div");
     header.className = "header";
@@ -210,6 +240,11 @@ export class AssistantChatWidget extends HTMLElement {
 
     this.messagesEl = document.createElement("div");
     this.messagesEl.className = "messages";
+    // Announces new assistant replies (including a "needs confirmation" prompt) to screen
+    // readers as they arrive — "log" + "polite" so a burst of messages is read out in order
+    // without interrupting whatever the shopper is doing.
+    this.messagesEl.setAttribute("role", "log");
+    this.messagesEl.setAttribute("aria-live", "polite");
     for (const stored of this.messageHistory) {
       this.renderMessage(stored.text, stored.role, stored.confirm, stored.productLinks ?? [], stored.showCartLink ?? false);
     }
@@ -218,6 +253,7 @@ export class AssistantChatWidget extends HTMLElement {
     this.inputEl = document.createElement("input");
     this.inputEl.type = "text";
     this.inputEl.placeholder = "Ask about products, your cart...";
+    this.inputEl.setAttribute("aria-label", "Message");
     this.buttonEl = document.createElement("button");
     this.buttonEl.type = "submit";
     this.buttonEl.textContent = "Send";
@@ -228,34 +264,47 @@ export class AssistantChatWidget extends HTMLElement {
     panel.appendChild(this.messagesEl);
     panel.appendChild(form);
 
-    const launcher = document.createElement("button");
-    launcher.type = "button";
-    launcher.className = "launcher";
-    launcher.innerHTML = CHAT_ICON;
-    launcher.setAttribute("aria-label", "Open chat");
-    launcher.addEventListener("click", () => this.setOpen(!this.hasAttribute("open")));
+    this.launcherEl = document.createElement("button");
+    this.launcherEl.type = "button";
+    this.launcherEl.className = "launcher";
+    this.launcherEl.innerHTML = CHAT_ICON;
+    this.launcherEl.setAttribute("aria-label", "Open chat");
+    this.launcherEl.setAttribute("aria-expanded", "false");
+    this.launcherEl.addEventListener("click", () => this.setOpen(!this.hasAttribute("open")));
 
     root.appendChild(style);
     root.appendChild(panel);
-    root.appendChild(launcher);
+    root.appendChild(this.launcherEl);
 
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       void this.handleSend();
     });
+
+    // Restored, not user-initiated — moving focus into the panel on every page load the
+    // shopper left it open on would be surprising (e.g. right after landing on the cart
+    // page post-checkout-confirmation); the panel itself is still visibly open either way.
+    if (this.loadOpenState()) this.setOpen(true, { focus: false });
   }
 
-  private setOpen(open: boolean): void {
+  private setOpen(open: boolean, opts: { focus?: boolean } = {}): void {
+    const { focus = true } = opts;
+    this.launcherEl.setAttribute("aria-expanded", String(open));
     if (open) {
       this.setAttribute("open", "");
-      this.inputEl.focus();
+      if (focus) this.inputEl.focus();
       // Restored/appended messages scroll-to-bottom while the panel is still `display:
       // none` (closed) — a hidden element reports scrollHeight 0, so that scroll silently
       // no-ops. Now that the panel is actually laid out, scroll to the real bottom.
       this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
     } else {
       this.removeAttribute("open");
+      // Real bug found via adversarial UX review: closing the panel previously left focus
+      // nowhere (it fell back to <body>) — a keyboard/screen-reader shopper lost their place
+      // entirely and had to re-tab from the top of the page to get back to the launcher.
+      if (focus) this.launcherEl.focus();
     }
+    this.saveOpenState(open);
   }
 
   private get apiBase(): string {
@@ -345,6 +394,25 @@ export class AssistantChatWidget extends HTMLElement {
     this.saveMessageHistory();
   }
 
+  /** DOM-only, never saved to history — the disabled input alone gave no visible sign of
+   * *why* nothing was happening while waiting on a reply (a real finding from adversarial
+   * UX review). `aria-hidden` deliberately keeps this out of the `aria-live` region: a
+   * screen reader announcing "typing" and then the real reply moments later is noise, not
+   * help — the final message landing is the announcement that matters. */
+  private appendTypingIndicator(): HTMLDivElement {
+    const el = document.createElement("div");
+    // Deliberately NOT ".message.assistant" — that class is how the rest of this file (and
+    // its tests) identify a REAL landed reply; a transient typing bubble matching the same
+    // selector raced `vi.waitFor(() => count === 1)` against its own removal+replacement in
+    // testing, and would equally confuse any other code counting real assistant turns.
+    el.className = "message typing";
+    el.setAttribute("aria-hidden", "true");
+    el.textContent = "Assistant is typing…";
+    this.messagesEl.appendChild(el);
+    this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+    return el;
+  }
+
   private async handleSend(): Promise<void> {
     const message = this.inputEl.value.trim();
     if (!message) return;
@@ -353,6 +421,7 @@ export class AssistantChatWidget extends HTMLElement {
     this.inputEl.value = "";
     this.inputEl.disabled = true;
     this.buttonEl.disabled = true;
+    const typingEl = this.appendTypingIndicator();
 
     try {
       const {
@@ -363,6 +432,7 @@ export class AssistantChatWidget extends HTMLElement {
         auto_navigate_product_id,
         auto_navigate_to_cart,
       } = await sendChatMessage(this.apiBase, this.sessionId, message, this.tenantKey, this.customerEmail);
+      typingEl.remove();
       this.appendMessage(reply, "assistant", needs_confirmation, product_links, show_cart_link);
 
       // Real navigation, not just a link — only for an unambiguous single-product focus or
@@ -378,6 +448,7 @@ export class AssistantChatWidget extends HTMLElement {
         return;
       }
     } catch {
+      typingEl.remove();
       this.appendMessage(
         "Sorry, I couldn't reach the assistant service right now. Please try again.",
         "assistant",

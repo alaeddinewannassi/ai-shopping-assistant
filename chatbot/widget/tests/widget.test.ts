@@ -446,4 +446,124 @@ describe("assistant-chat-widget", () => {
     });
     expect(shadow.querySelector(".message.assistant")?.textContent).toContain("couldn't reach");
   });
+
+  // -- Adversarial UX review findings (specs/003-adversarial-qa-review) ------------------ //
+
+  it("shows a typing indicator while waiting, and removes it once the real reply lands", async () => {
+    let resolveFetch!: (value: unknown) => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockReturnValue(
+        new Promise((resolve) => {
+          resolveFetch = resolve;
+        }),
+      ),
+    );
+
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+    const shadow = widget.shadowRoot!;
+    const input = shadow.querySelector<HTMLInputElement>("input")!;
+    const form = shadow.querySelector<HTMLFormElement>("form")!;
+    input.value = "hello";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    await vi.waitFor(() => {
+      expect(shadow.querySelector(".message.typing")).not.toBeNull();
+    });
+    // The transient typing bubble must never be mistaken for a real, landed reply.
+    expect(shadow.querySelector(".message.assistant")).toBeNull();
+
+    resolveFetch({
+      ok: true,
+      json: async () => ({ session_id: "s1", reply: "Here's what I found: shoes", needs_confirmation: false }),
+    });
+
+    await vi.waitFor(() => {
+      expect(shadow.querySelector(".message.assistant")?.textContent).toContain("shoes");
+    });
+    expect(shadow.querySelector(".message.typing")).toBeNull();
+  });
+
+  it("has accessible names/roles for the input, message log, and panel", () => {
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+    const shadow = widget.shadowRoot!;
+
+    expect(shadow.querySelector("input")?.getAttribute("aria-label")).toBe("Message");
+    expect(shadow.querySelector(".messages")?.getAttribute("role")).toBe("log");
+    expect(shadow.querySelector(".messages")?.getAttribute("aria-live")).toBe("polite");
+    expect(shadow.querySelector(".panel")?.getAttribute("role")).toBe("dialog");
+    expect(shadow.querySelector(".launcher")?.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("toggles aria-expanded and returns focus to the launcher when closed", () => {
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+    const shadow = widget.shadowRoot!;
+    const launcher = shadow.querySelector<HTMLButtonElement>(".launcher")!;
+    const closeButton = shadow.querySelector<HTMLButtonElement>(".header button")!;
+
+    launcher.click();
+    expect(widget.hasAttribute("open")).toBe(true);
+    expect(launcher.getAttribute("aria-expanded")).toBe("true");
+
+    closeButton.click();
+    expect(widget.hasAttribute("open")).toBe(false);
+    expect(launcher.getAttribute("aria-expanded")).toBe("false");
+    expect(shadow.activeElement).toBe(launcher);
+  });
+
+  it("restores the open/closed state across a simulated page navigation", () => {
+    const first = document.createElement("assistant-chat-widget");
+    document.body.appendChild(first);
+    const firstShadow = first.shadowRoot!;
+    firstShadow.querySelector<HTMLButtonElement>(".launcher")!.click();
+    expect(first.hasAttribute("open")).toBe(true);
+
+    // Simulates the real page-load-on-navigation this is meant to survive (see the existing
+    // transcript-restore test above) — a fresh element re-reading the same localStorage.
+    first.remove();
+    const second = document.createElement("assistant-chat-widget");
+    document.body.appendChild(second);
+
+    expect(second.hasAttribute("open")).toBe(true);
+  });
+
+  it("stays closed by default for a session that never opened the panel", () => {
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+
+    expect(widget.hasAttribute("open")).toBe(false);
+  });
+
+  it("times out a hung request instead of leaving the input disabled forever", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+        // A backend that hangs (never resolves, never rejects on its own) rather than one
+        // that errors quickly — only the AbortSignal firing settles this promise, exactly
+        // like a real hung request would behave once aborted.
+        return new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+        });
+      }),
+    );
+
+    const widget = document.createElement("assistant-chat-widget");
+    document.body.appendChild(widget);
+    const shadow = widget.shadowRoot!;
+    const input = shadow.querySelector<HTMLInputElement>("input")!;
+    const form = shadow.querySelector<HTMLFormElement>("form")!;
+    input.value = "hello";
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    expect(input.disabled).toBe(true);
+    await vi.advanceTimersByTimeAsync(20_000);
+
+    expect(shadow.querySelector(".message.assistant")?.textContent).toContain("couldn't reach");
+    expect(input.disabled).toBe(false);
+    vi.useRealTimers();
+  });
 });
