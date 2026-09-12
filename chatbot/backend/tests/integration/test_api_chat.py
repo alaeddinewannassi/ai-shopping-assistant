@@ -55,3 +55,21 @@ def test_chat_endpoint_routes_a_full_add_to_cart_confirmation_flow() -> None:
     # A genuinely confirmed mutation is worth a real navigation, not a redundant link.
     assert confirm.json()["auto_navigate_to_cart"] is True
     assert confirm.json()["show_cart_link"] is False
+
+
+def test_needs_confirmation_is_false_for_an_unrelated_reply_while_a_proposal_is_still_pending() -> None:
+    """Regression test for a real, confirmed live bug: after proposing a cart mutation,
+    a shopper who asks about something else entirely (never answering yes/no) kept seeing
+    EVERY subsequent reply rendered with the "needs your confirmation" badge, because
+    needs_confirmation was `session.pending_action is not None` — a raw existence check.
+    The original proposal is still technically pending, but THIS turn's reply is a plain
+    search result with nothing to confirm — it must not carry the badge."""
+    session_id = "http-test-3"
+    propose = client.post(
+        "/chat", json={"session_id": session_id, "message": "add the red classic t-shirt to my cart"}
+    )
+    assert propose.json()["needs_confirmation"] is True
+
+    unrelated = client.post("/chat", json={"session_id": session_id, "message": "show me jackets"})
+    assert "jacket" in unrelated.json()["reply"].lower()
+    assert unrelated.json()["needs_confirmation"] is False

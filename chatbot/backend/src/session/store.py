@@ -74,6 +74,14 @@ class ConversationSession:
     # widget navigates to the store's own real checkout page instead of chat having placed
     # an order directly (see PendingActionGate.confirm()'s checkout branch).
     last_turn_handoff_to_native_checkout: bool = False
+    # True only when THIS turn's action handling actually (re-)presented a confirmation
+    # prompt — a genuinely new/changed PendingAction — not merely "one happens to still
+    # exist from an earlier, unrelated turn." Fixes a real, confirmed live bug:
+    # needs_confirmation used to be `pending_action is not None`, which stayed True on
+    # every turn after a proposal until explicitly resolved, even for a totally unrelated
+    # reply in between (e.g. an off-topic question correctly declined by ask_or_chat still
+    # rendered with the "needs your confirmation" badge). See _route_turn in dialogue.py.
+    last_turn_needs_confirmation: bool = False
     # Persists across turns (unlike the last_turn_* fields above) until resolved — set
     # whenever resolve_add_to_cart lands on exactly one product but can't tell which variant
     # (AMBIGUOUS_VARIANT), cleared once that's answered or a clearly different flow starts.
@@ -211,6 +219,7 @@ class SessionStore:
                 last_turn_auto_navigate_to_cart=data.get("last_turn_auto_navigate_to_cart", False),
                 last_turn_client_cart_action=data.get("last_turn_client_cart_action"),
                 last_turn_handoff_to_native_checkout=data.get("last_turn_handoff_to_native_checkout", False),
+                last_turn_needs_confirmation=data.get("last_turn_needs_confirmation", False),
                 pending_variant_product_id=data.get("pending_variant_product_id"),
                 pending_variant_product_name=data.get("pending_variant_product_name", ""),
                 pending_action=PendingAction(**pending) if pending else None,

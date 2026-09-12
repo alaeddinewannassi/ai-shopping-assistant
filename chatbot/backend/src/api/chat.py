@@ -171,7 +171,7 @@ def chat(
     return ChatResponse(
         session_id=request.session_id,
         reply=reply,
-        needs_confirmation=session.pending_action is not None,
+        needs_confirmation=session.last_turn_needs_confirmation,
         product_links=[
             ProductLink(id=pid, name=name)
             for pid, name in zip(session.last_turn_product_ids, session.last_turn_product_names)

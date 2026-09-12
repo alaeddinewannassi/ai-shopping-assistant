@@ -83,6 +83,10 @@ class RuleBasedStubClient:
         r"\bupdate\b|\bchange (?:the )?quantity\b|\bset (?:the )?quantity\b|\bmake it\b", re.IGNORECASE
     )
     _ADD_PATTERNS = re.compile(r"\badd\b.*\bto\b.*\bcart\b|\badd\b", re.IGNORECASE)
+    # Checked only after every mutation-verb pattern above has already failed to match, so
+    # "remove ... my cart" / "add ... to my cart" still correctly resolve as mutations, not
+    # a view — by this point, any remaining mention of "cart" is a shopper asking to see it.
+    _VIEW_CART_PATTERNS = re.compile(r"\bcart\b", re.IGNORECASE)
 
     def parse_turn(self, message: str, context: dict, *, session_id: str | None = None) -> ActionCall:
         text = message.strip()
@@ -103,6 +107,8 @@ class RuleBasedStubClient:
             return ActionCall(action_type="propose_update_cart", parameters={"raw_text": text})
         if self._ADD_PATTERNS.search(text):
             return ActionCall(action_type="propose_add_to_cart", parameters={"raw_text": text})
+        if self._VIEW_CART_PATTERNS.search(text):
+            return ActionCall(action_type="view_cart")
         if context.get("pending_variant_product"):
             # A bare attribute answer ("size S white") to an open which-size/color question
             # matches none of the patterns above — without this, the stub (like a real LLM
@@ -237,6 +243,21 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "view_cart",
+            "description": (
+                "The shopper wants to see or be reminded of what's currently in their "
+                "cart — e.g. \"what's in my cart\", \"show my cart\", \"what do I have so "
+                "far\", or a bare \"recap\"/\"my cart\" said on its own (not right after a "
+                "search/browse result, which is a request for a recap of the PRODUCTS just "
+                "shown instead — use ask_or_chat for that). Never answer this from memory "
+                "or context — this tool reads the real, current cart."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "apply_promo",
             "description": (
                 "The shopper mentions a promo/coupon/discount code, or asks whether any "
@@ -346,6 +367,12 @@ answers that (even just "size S", "white", or similar, with no product name), cl
 propose_add_to_cart with raw_text set to the shopper's own words — do not treat it as a new \
 search.
 - If the shopper wants to check out / place the order right now, use request_checkout.
+- If the shopper wants to see or be reminded of what's in their cart — "what's in my \
+cart", "show my cart", "what do I have so far", or a bare "recap"/"my cart" with no other \
+product context — use view_cart. This is different from asking to see products just \
+searched/shown again (use ask_or_chat for that, from the "[Context: you just showed the \
+shopper these products: ...]" line) — view_cart is specifically about the shopper's CART, \
+not a product list.
 - If the shopper mentions a promo/coupon/discount code, or asks ANY question about \
 discounts/promos/deals — including a bare "is there a discount?" or "any deals?" with no \
 code named — use apply_promo with the shopper's own words as raw_text; it correctly answers \

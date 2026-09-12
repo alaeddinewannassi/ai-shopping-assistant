@@ -464,6 +464,25 @@ def _handle_request_checkout(ctx: DialogueContext, session_id: str) -> str:
     return f"{recap} Shall I place the order? (reply 'yes' to confirm or 'no' to cancel)"
 
 
+def _handle_view_cart(ctx: DialogueContext, session_id: str) -> str:
+    """Real, confirmed live gap: a shopper asking "what's in my cart" / "recap my cart" had
+    no tool at all to route to — every existing action_type is either a mutation proposal,
+    checkout, or a read-only answer about a SPECIFIC product/search, none of which read the
+    cart. It fell through to ask_or_chat, which has no cart data and could only ask the
+    shopper to clarify, even after they'd already clarified. Deterministic, exact template
+    (build_cart_summary, the same one used after a confirmed mutation) — never phrased by
+    the LLM, matching every other cart/money fact in this file."""
+    assert ctx.pending_gate is not None
+    session = ctx.session_store.get_or_create(session_id)
+    try:
+        cart = _get_cart(ctx, session)
+    except AdapterUnavailableError as exc:
+        log_action(session_id, "view_cart", "get_cart", "unavailable", details={"error": str(exc)[:500]})
+        return "I can't reach your cart right now. Please try again in a moment."
+    log_action(session_id, "view_cart", "get_cart", "ok")
+    return build_cart_summary(cart, _products_by_id_for_cart(ctx, cart))
+
+
 def _handle_checkout_state_changed(ctx: DialogueContext, session_id: str) -> str:
     """FR-009 / US3 Scenario 4: cart/stock/price/promo changed between recap and
     confirmation. Re-validates against the store and requires a fresh confirmation instead
@@ -745,7 +764,10 @@ def _handle_decline(ctx: DialogueContext, session_id: str) -> str:
 # get_product_details, checkout, and the promo flow itself are excluded for the same
 # reason: each is already answering (or gating) something specific, not "here's what's
 # available," which is the only context where a cross-sell doesn't compete for attention.
-_ALLOW_PROMO_SUGGESTION_AFTER = {"search_products", "navigate_to"}
+# view_cart is included: since the suggestion recap now always states the real cart
+# contents (_promo_suggestion_recap), "here's your cart, and by the way you qualify for
+# X% off" is exactly the self-contained, in-context moment this allowlist exists for.
+_ALLOW_PROMO_SUGGESTION_AFTER = {"search_products", "navigate_to", "view_cart"}
 
 # Action types whose reply may be handed to phrase_reply for natural rephrasing — read-only
 # discovery only. See _route_turn's comment for why cart/checkout/confirm/decline/promo never
@@ -874,6 +896,17 @@ def _build_llm_context(session: ConversationSession, ctx: DialogueContext) -> di
 
 def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
     session = ctx.session_store.get_or_create(session_id)
+    # Real, confirmed live bug: ChatResponse.needs_confirmation used to mean "does a
+    # PendingAction exist anywhere in session state" — which stays True on every turn
+    # AFTER a proposal until the shopper explicitly says yes/no, even for a completely
+    # unrelated reply in between (e.g. an off-topic question correctly declined by
+    # ask_or_chat). The widget then rendered THAT unrelated reply with the "needs your
+    # confirmation" badge too, with nothing in it to actually confirm. The real signal
+    # is "did THIS turn's action handling just (re-)propose a confirmation prompt" —
+    # captured here as a before/after action_id comparison so it works uniformly for
+    # every handler (a fresh propose, a CartStateChangedError re-propose, a superseded
+    # prior proposal) without needing to hand-flag every branch that presents one.
+    pending_action_id_before = session.pending_action.action_id if session.pending_action else None
 
     pending_quantity_override = _pending_add_quantity_override(session, message)
     if pending_quantity_override is not None and ctx.cart_handler and ctx.pending_gate:
@@ -995,6 +1028,10 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
     elif action.action_type == "request_checkout" and ctx.pending_gate:
         reply = _handle_request_checkout(ctx, session_id)
 
+    elif action.action_type == "view_cart" and ctx.pending_gate:
+        reply = _handle_view_cart(ctx, session_id)
+        shows_cart_link = False  # the reply already IS the cart contents, a link is redundant
+
     elif action.action_type == "apply_promo" and ctx.promo_handler and ctx.pending_gate:
         reply = _handle_apply_promo(ctx, session_id, action.parameters.get("raw_text", message))
 
@@ -1055,6 +1092,14 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
     session.last_turn_auto_navigate_to_cart = auto_navigate_to_cart
     session.last_turn_client_cart_action = client_cart_action
     session.last_turn_handoff_to_native_checkout = handoff_to_native_checkout
+    # True only when THIS turn's handling actually (re-)presented a confirmation prompt —
+    # a genuinely new/changed PendingAction, not merely "one happens to still exist from an
+    # earlier, unrelated turn." See pending_action_id_before's comment at the top of this
+    # function for why a bare existence check was wrong.
+    pending_action_id_after = session.pending_action.action_id if session.pending_action else None
+    session.last_turn_needs_confirmation = (
+        pending_action_id_after is not None and pending_action_id_after != pending_action_id_before
+    )
     ctx.session_store.save(session)
 
     if action.action_type == "ask_or_chat":
