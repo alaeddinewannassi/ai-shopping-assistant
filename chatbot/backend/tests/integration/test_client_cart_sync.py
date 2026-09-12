@@ -168,6 +168,36 @@ def test_proactive_promo_suggestion_validates_against_the_real_synced_cart() -> 
     assert session.pending_action.parameters["code"] == "WELCOME10"
 
 
+def test_promo_suggestion_states_the_real_cart_contents_even_when_added_outside_chat() -> None:
+    """Regression test for a real design gap raised while testing live: a proactive
+    suggestion says "you qualify for a discount, apply it to your cart?" without ever
+    saying WHAT's in that cart. Harmless when the chatbot's own cart only ever held
+    items the shopper just added through chat — but client-cart-sync means the real cart
+    can now contain an item added entirely outside this conversation (browsed and added
+    normally, before the shopper ever opened chat). The shopper here asks about a
+    DIFFERENT product than what's actually in their cart — the suggestion must name the
+    real item, not just gesture vaguely at "your cart"."""
+    from src.promo.strategy import PromoStrategyRule
+
+    adapter = _ClientSyncAdapter()
+    session_store = SessionStore(redis_url=None)
+    llm_client = _ScriptedLLMClient(ActionCall(action_type="search_products", parameters={"query": "posters"}))
+    ctx = _ctx(adapter, llm_client, session_store)
+    ctx.promo_rules = [
+        PromoStrategyRule(rule_id="welcome", condition="first_order and subtotal > 0", target_code="WELCOME10", priority=5)
+    ]
+
+    # A real cart the shopper populated by browsing normally BEFORE ever opening chat —
+    # never mentioned in this conversation at all.
+    reply = handle_turn(
+        ctx, "s5", "show me posters",
+        cart_snapshot=[{"variant_id": "prod-jacket-1#var-jacket-1-blue-m", "quantity": 1}],
+    )
+
+    assert "WELCOME10" in reply
+    assert "Blue Jacket" in reply  # the real cart contents, not just "your cart"
+
+
 def test_confirmed_checkout_hands_off_to_native_checkout_for_a_synced_session() -> None:
     adapter = _ClientSyncAdapter()
     session_store = SessionStore(redis_url=None)

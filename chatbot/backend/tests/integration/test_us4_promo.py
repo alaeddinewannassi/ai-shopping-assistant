@@ -91,6 +91,9 @@ def test_cart_matching_rule_gets_proactive_suggestion_with_benefit(
 
     assert "BIGCART15" in reply
     assert "$" in reply  # benefit explanation includes the savings amount
+    # Real, confirmed live UX gap: "you qualify for a discount, apply it to your cart?"
+    # never said WHAT was in that cart — the suggestion must be self-contained.
+    assert "Blue Jacket" in reply
 
     session = session_store.get_or_create("p1")
     assert session.pending_action is not None

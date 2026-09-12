@@ -527,13 +527,28 @@ def _handle_apply_promo(ctx: DialogueContext, session_id: str, raw_text: str) ->
 
     assert resolution.kind == PromoResolutionKind.RESOLVED
     validation = resolution.validation
-    recap = f"Apply code {resolution.code} for a ${validation.discount_amount:.2f} discount?"
+    recap = _promo_suggestion_recap(ctx, cart, resolution.code, validation.discount_amount)
     action = ctx.pending_gate.propose(session_id, "apply_promo", {"code": resolution.code}, recap)
     log_action(
         session_id, "apply_promo", "propose", "pending",
         details={"action_id": action.action_id, "code": resolution.code},
     )
     return f"{recap} (reply 'yes' to confirm or 'no' to cancel)"
+
+
+def _promo_suggestion_recap(ctx: DialogueContext, cart, code: str, discount_amount: float) -> str:
+    """Real, confirmed live UX gap: "You qualify for a discount, apply it to your cart?"
+    never said WHAT was actually in that cart — harmless back when the chatbot's own cart
+    only ever held items the shopper had just added through chat, but genuinely confusing
+    now that client-cart-sync means the real cart can contain items added entirely outside
+    this conversation (browsed and added normally, from an earlier session, or by someone
+    else on a shared device). Always state the real contents first, so the suggestion is
+    self-contained no matter how those items got there."""
+    cart_summary = build_cart_summary(cart, _products_by_id_for_cart(ctx, cart))
+    return (
+        f"{cart_summary} You qualify for code {code}, which would save you "
+        f"${discount_amount:.2f}. Apply it to your cart?"
+    )
 
 
 def _describe_available_promos(ctx: DialogueContext, session_id: str, session: ConversationSession) -> str:
@@ -555,10 +570,7 @@ def _describe_available_promos(ctx: DialogueContext, session_id: str, session: C
                 break
             if validation.valid:
                 assert ctx.pending_gate is not None
-                recap = (
-                    f"You qualify for code {suggestion.code}, which would save you "
-                    f"${validation.discount_amount:.2f}. Apply it to your cart?"
-                )
+                recap = _promo_suggestion_recap(ctx, cart, suggestion.code, validation.discount_amount)
                 action = ctx.pending_gate.propose(session_id, "apply_promo", {"code": suggestion.code}, recap)
                 log_action(
                     session_id, "promo_suggestion", "suggest", "shown",
@@ -598,10 +610,7 @@ def _maybe_suggest_promo(ctx: DialogueContext, session_id: str, reply: str) -> s
             return reply
         if not validation.valid:
             continue
-        recap = (
-            f"You qualify for code {suggestion.code}, which would save you "
-            f"${validation.discount_amount:.2f}. Apply it to your cart?"
-        )
+        recap = _promo_suggestion_recap(ctx, cart, suggestion.code, validation.discount_amount)
         action = ctx.pending_gate.propose(session_id, "apply_promo", {"code": suggestion.code}, recap)
         log_action(
             session_id, "promo_suggestion", "suggest", "shown",
