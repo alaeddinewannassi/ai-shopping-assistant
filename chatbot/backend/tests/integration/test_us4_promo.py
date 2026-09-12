@@ -12,7 +12,7 @@ import pytest
 from src.adapters.mock import MockAdapter
 from src.agent.dialogue import DialogueContext, handle_turn
 from src.agent.intents import CartIntentHandler, DiscoveryIntentHandler, PromoIntentHandler
-from src.agent.llm_client import RuleBasedStubClient
+from src.agent.llm_client import ActionCall, RuleBasedStubClient
 from src.agent.pending import PendingActionGate
 from src.agent.taxonomy_resolver import TaxonomyResolver
 from src.promo.strategy import PromoStrategyRule
@@ -177,6 +177,83 @@ def test_shopper_provided_invalid_code_reports_reason_clearly(
     assert session.pending_action is None
     cart = adapter.get_cart("p5")
     assert cart.applied_promo_code is None
+
+
+# -- Conservative suggestion timing (real live UX bugs) ----------------------- #
+
+
+class _FixedActionLLMClient:
+    """RuleBasedStubClient has no ask_or_chat/get_product_details branch at all (anything
+    it doesn't recognize as a specific keyword falls back to search_products) — these two
+    action types are unreachable through it, so a fixed-action double is needed to exercise
+    them directly for this one turn."""
+
+    def __init__(self, action: ActionCall) -> None:
+        self._action = action
+
+    def parse_turn(self, message: str, context: dict, *, session_id: str | None = None) -> ActionCall:
+        return self._action
+
+    def phrase_reply(self, facts: str, shopper_message: str, *, session_id: str | None = None) -> str:
+        return facts
+
+
+def test_suggestion_never_appended_to_an_open_ended_ask_or_chat_reply(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore,
+    promo_rules: list[PromoStrategyRule],
+) -> None:
+    """Regression test for a real, confirmed live bug: a proactive suggestion got tacked
+    onto an ask_or_chat reply that was itself an open question awaiting the shopper's
+    answer ("tell me about your friend's interests?") — the combined bubble then rendered
+    with needs_confirmation styling as if the open question also needed a yes/no. A
+    qualifying cart must never turn a plain conversational turn into that."""
+    ctx = _ctx(adapter, llm_client, session_store, promo_rules)
+    _add_and_confirm(ctx, "p7", "add the blue jacket size m to my cart")
+    _add_and_confirm(ctx, "p7", "update the blue jacket quantity to 2")  # qualifies for BIGCART15
+
+    ctx.llm_client = _FixedActionLLMClient(
+        ActionCall(action_type="ask_or_chat", parameters={"text": "Sure, tell me more about your friend!"})
+    )
+    reply = handle_turn(ctx, "p7", "hello")
+
+    assert "BIGCART15" not in reply
+    session = session_store.get_or_create("p7")
+    assert session.pending_action is None
+
+
+def test_suggestion_never_appended_to_a_product_details_answer(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore,
+    promo_rules: list[PromoStrategyRule],
+) -> None:
+    """A get_product_details answer is answering a specific question, not "here's what's
+    available" — the only context a cross-sell doesn't compete for attention in."""
+    ctx = _ctx(adapter, llm_client, session_store, promo_rules)
+    _add_and_confirm(ctx, "p8", "add the blue jacket size m to my cart")
+    _add_and_confirm(ctx, "p8", "update the blue jacket quantity to 2")  # qualifies for BIGCART15
+
+    ctx.llm_client = _FixedActionLLMClient(
+        ActionCall(action_type="get_product_details", parameters={"raw_text": "what sizes does the blue jacket come in"})
+    )
+    reply = handle_turn(ctx, "p8", "what sizes does the blue jacket come in")
+
+    assert "BIGCART15" not in reply
+    session = session_store.get_or_create("p8")
+    assert session.pending_action is None
+
+
+def test_suggestion_still_appears_after_a_genuine_search_result(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore,
+    promo_rules: list[PromoStrategyRule],
+) -> None:
+    """The one context a proactive suggestion IS appropriate: a real search/browse result,
+    where the shopper isn't already mid-answer to something else."""
+    ctx = _ctx(adapter, llm_client, session_store, promo_rules)
+    _add_and_confirm(ctx, "p9", "add the blue jacket size m to my cart")
+    _add_and_confirm(ctx, "p9", "update the blue jacket quantity to 2")  # qualifies for BIGCART15
+
+    reply = handle_turn(ctx, "p9", "show me jackets")
+
+    assert "BIGCART15" in reply
 
 
 # -- Scenario 5: no rule matches -> honest "no discount available" ---------- #

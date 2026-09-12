@@ -439,6 +439,9 @@ class PrestaShopAdapter:
         return self._read_cart(id_cart)
 
     def validate_promo(self, cart_id: str, code: str) -> PromoValidation:
+        return self.validate_promo_for_cart(self.get_cart(cart_id), code)
+
+    def validate_promo_for_cart(self, cart: Cart, code: str) -> PromoValidation:
         rule = self._find_cart_rule(code)
         if rule is None:
             return PromoValidation(code=code, valid=False, reason="Code not found or inactive")
@@ -447,7 +450,6 @@ class PrestaShopAdapter:
         if not self._within_date_range(rule):
             return PromoValidation(code=code, valid=False, reason="Code is expired or not yet active")
 
-        cart = self.get_cart(cart_id)
         minimum_amount = _as_float(rule.get("minimum_amount"))
         if cart.subtotal < minimum_amount:
             return PromoValidation(

@@ -605,21 +605,27 @@ class PromoResolution:
 class PromoIntentHandler:
     """Resolves a shopper's promo-code turn — either a manually-provided code (T060) or a
     shopper accepting a proactively-suggested one — the same way in both cases: straight to
-    `adapter.validate_promo()` (contracts/promo-strategy.md "Manually-provided codes"). The
-    engine (`promo/engine.py`) is never consulted here; it only drives proactive
-    suggestions (T058), which are surfaced as plain text, not through this handler."""
+    `adapter.validate_promo_for_cart()` (contracts/promo-strategy.md "Manually-provided
+    codes"). The engine (`promo/engine.py`) is never consulted here; it only drives
+    proactive suggestions (T058), which are surfaced as plain text, not through this
+    handler."""
 
     def __init__(self, adapter: CommerceAdapter) -> None:
         self._adapter = adapter
 
-    def resolve_apply_promo(self, cart_id: str, raw_text: str) -> PromoResolution:
+    def resolve_apply_promo(self, cart: Cart, raw_text: str) -> PromoResolution:
+        """`cart` is the caller's already-resolved Cart (dialogue.py's _get_cart) — not a
+        bare cart_id — so validation always checks the shopper's REAL cart, including a
+        client-cart-synced one this adapter could never re-fetch correctly from an id alone
+        (a real, confirmed live bug: a proactive suggestion computed a $0.00 discount by
+        validating against the wrong, disconnected cart)."""
         match = _PROMO_CODE_PATTERN.search(raw_text)
         if match is None:
             return PromoResolution(kind=PromoResolutionKind.NO_CODE_GIVEN)
 
         code = match.group(1).upper()
         try:
-            validation = self._adapter.validate_promo(cart_id, code)
+            validation = self._adapter.validate_promo_for_cart(cart, code)
         except AdapterUnavailableError as exc:
             _log_unavailable(f"apply_promo:{code}", exc)
             return PromoResolution(kind=PromoResolutionKind.UNAVAILABLE)

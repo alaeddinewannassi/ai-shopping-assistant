@@ -503,8 +503,12 @@ def _handle_apply_promo(ctx: DialogueContext, session_id: str, raw_text: str) ->
     for *proactive* suggestions (`_maybe_suggest_promo`), never here."""
     assert ctx.promo_handler is not None and ctx.pending_gate is not None
     session = ctx.session_store.get_or_create(session_id)
-    cart_id = _cart_id_for(session)
-    resolution = ctx.promo_handler.resolve_apply_promo(cart_id, raw_text)
+    try:
+        cart = _get_cart(ctx, session)
+    except AdapterUnavailableError as exc:
+        log_action(session_id, "apply_promo", "get_cart", "unavailable", details={"error": str(exc)[:500]})
+        return "I can't reach the store right now, so I can't verify a promo code. Please try again in a moment."
+    resolution = ctx.promo_handler.resolve_apply_promo(cart, raw_text)
 
     if resolution.kind == PromoResolutionKind.NO_CODE_GIVEN:
         return _describe_available_promos(ctx, session_id, session)
@@ -545,7 +549,7 @@ def _describe_available_promos(ctx: DialogueContext, session_id: str, session: C
         session_context = {"first_order": not session.has_completed_order}
         for suggestion in promo_engine.evaluate(cart, session_context, ctx.promo_rules):
             try:
-                validation = ctx.adapter.validate_promo(_cart_id_for(session), suggestion.code)
+                validation = ctx.adapter.validate_promo_for_cart(cart, suggestion.code)
             except AdapterUnavailableError as exc:
                 _logger.warning("Adapter unavailable during promo check for %s: %s", session_id, exc)
                 break
@@ -588,7 +592,7 @@ def _maybe_suggest_promo(ctx: DialogueContext, session_id: str, reply: str) -> s
     session_context = {"first_order": not session.has_completed_order}
     for suggestion in promo_engine.evaluate(cart, session_context, ctx.promo_rules):
         try:
-            validation = ctx.adapter.validate_promo(_cart_id_for(session), suggestion.code)
+            validation = ctx.adapter.validate_promo_for_cart(cart, suggestion.code)
         except AdapterUnavailableError as exc:
             _logger.warning("Adapter unavailable during proactive promo suggestion for %s: %s", session_id, exc)
             return reply
@@ -717,12 +721,22 @@ def _handle_decline(ctx: DialogueContext, session_id: str) -> str:
 
 # Turns after which a fresh proactive promo suggestion would be noise (the promo flow
 # itself, and final checkout/confirm/decline turns) — see _maybe_suggest_promo.
-_SKIP_PROMO_SUGGESTION_AFTER = {
-    "apply_promo",
-    "confirm_pending_action",
-    "decline_pending_action",
-    "request_checkout",
-}
+# A proactive promo suggestion may only piggyback on a genuine search/browse RESULT —
+# deliberately an allowlist, not a blacklist of turns to avoid, per real, confirmed live
+# bugs found via live testing:
+#   - Tacked onto an ask_or_chat reply that was ITSELF an open question awaiting the
+#     shopper's answer ("Could you tell me about your friend's interests?") — the whole
+#     combined bubble then rendered with needs_confirmation styling (a yes/no badge) even
+#     though the first half wasn't a yes/no question at all. ask_or_chat covers everything
+#     from a bare greeting to a clarifying question with no reliable way to tell them apart
+#     here, so it's never a safe turn to append a suggestion to.
+#   - A confirmed cart mutation (confirm_pending_action) already just cleared one
+#     PendingAction — immediately creating a second one risks the shopper's next "yes"
+#     landing on the wrong proposal.
+# get_product_details, checkout, and the promo flow itself are excluded for the same
+# reason: each is already answering (or gating) something specific, not "here's what's
+# available," which is the only context where a cross-sell doesn't compete for attention.
+_ALLOW_PROMO_SUGGESTION_AFTER = {"search_products", "navigate_to"}
 
 # Action types whose reply may be handed to phrase_reply for natural rephrasing — read-only
 # discovery only. See _route_turn's comment for why cart/checkout/confirm/decline/promo never
@@ -1001,7 +1015,7 @@ def _route_turn(ctx: DialogueContext, session_id: str, message: str) -> str:
             f"implemented as part of its user story; see tasks.md.)"
         )
 
-    if action.action_type in _SKIP_PROMO_SUGGESTION_AFTER:
+    if action.action_type not in _ALLOW_PROMO_SUGGESTION_AFTER:
         final_reply = reply
     else:
         final_reply = _maybe_suggest_promo(ctx, session_id, reply)

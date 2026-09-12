@@ -255,7 +255,10 @@ class MockAdapter:
 
     def validate_promo(self, cart_id: str, code: str) -> PromoValidation:
         self._check_available()
-        cart = self.get_cart(cart_id)
+        return self.validate_promo_for_cart(self.get_cart(cart_id), code)
+
+    def validate_promo_for_cart(self, cart: Cart, code: str) -> PromoValidation:
+        self._check_available()
         rule = self._promo_rules.get(code.upper())
         if rule is None or not rule.active:
             return PromoValidation(code=code, valid=False, reason="Code not found or inactive")

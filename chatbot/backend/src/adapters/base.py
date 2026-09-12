@@ -195,6 +195,17 @@ class CommerceAdapter(Protocol):
         """Read-only validation call (does not mutate the cart). Raises AdapterUnavailableError."""
         ...
 
+    def validate_promo_for_cart(self, cart: Cart, code: str) -> PromoValidation:
+        """Same validation as validate_promo, against an already-resolved Cart directly
+        instead of a cart_id this adapter would re-fetch by. Real, confirmed live bug this
+        exists to fix: a client-cart-synced session's real cart (dialogue.py's _get_cart)
+        isn't reachable via any cart_id this adapter's own get_cart() would resolve
+        correctly, so validating "by id" silently checked an empty, disconnected cart and
+        proposed a $0.00 discount. Every caller that already has a Cart object in hand
+        (dialogue.py's promo-suggestion/description paths) MUST use this instead of
+        validate_promo(cart_id, ...)."""
+        ...
+
     def apply_promo(self, cart_id: str, code: str) -> Cart:
         """Raises PromoInvalidError / AdapterUnavailableError."""
         ...

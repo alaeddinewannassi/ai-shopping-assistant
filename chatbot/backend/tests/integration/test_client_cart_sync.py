@@ -138,6 +138,36 @@ def test_a_caller_that_never_sends_a_snapshot_keeps_todays_backend_owned_cart_be
     assert len(cart.lines) == 1
 
 
+def test_proactive_promo_suggestion_validates_against_the_real_synced_cart() -> None:
+    """Regression test for a real, confirmed live bug: a proactive suggestion computed
+    "save you $0.00" because validation checked the backend's own disconnected cart_id
+    (empty, since nothing had ever been added through it) instead of the shopper's real,
+    synced cart — even though a genuine, non-empty real cart existed. Discount must be
+    computed from the REAL cart's subtotal."""
+    from src.promo.strategy import PromoStrategyRule
+
+    adapter = _ClientSyncAdapter()
+    session_store = SessionStore(redis_url=None)
+    llm_client = _ScriptedLLMClient(ActionCall(action_type="search_products", parameters={"query": "notebooks"}))
+    ctx = _ctx(adapter, llm_client, session_store)
+    ctx.promo_rules = [
+        PromoStrategyRule(rule_id="welcome", condition="first_order and subtotal > 0", target_code="WELCOME10", priority=5)
+    ]
+
+    # A real, non-empty synced cart (e.g. added earlier via the widget) — never touched
+    # through this backend's own add_cart_item, exactly like the live bug.
+    reply = handle_turn(
+        ctx, "s4", "show me notebooks",
+        cart_snapshot=[{"variant_id": "18#36", "quantity": 1}],
+    )
+
+    assert "WELCOME10" in reply
+    assert "$0.00" not in reply
+    session = session_store.get_or_create("s4")
+    assert session.pending_action is not None
+    assert session.pending_action.parameters["code"] == "WELCOME10"
+
+
 def test_confirmed_checkout_hands_off_to_native_checkout_for_a_synced_session() -> None:
     adapter = _ClientSyncAdapter()
     session_store = SessionStore(redis_url=None)
