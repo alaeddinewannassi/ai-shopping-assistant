@@ -23,6 +23,7 @@ from src.agent.llm_client import LLMClient, RuleBasedStubClient, create_llm_clie
 from src.agent.pending import PendingActionGate
 from src.agent.taxonomy_resolver import TaxonomyResolver
 from src.session.catalog_cache import CatalogSnapshotCache
+from src.session.faq_cache import FaqCache
 from src.session.store import SessionStore
 from src.tenancy.config import TenantConfig
 
@@ -88,7 +89,8 @@ def build_tenant_runtime(config: TenantConfig) -> TenantRuntime:
     catalog_cache = CatalogSnapshotCache(key_prefix=key_prefix)
     pending_gate = PendingActionGate(session_store, adapter)
     taxonomy_resolver = TaxonomyResolver(adapter)
-    discovery_handler = DiscoveryIntentHandler(adapter, taxonomy_resolver, catalog_cache)
+    faq_cache = FaqCache()
+    discovery_handler = DiscoveryIntentHandler(adapter, taxonomy_resolver, catalog_cache, faq_cache)
     cart_handler = CartIntentHandler(adapter)
     promo_handler = PromoIntentHandler(adapter)
 

@@ -20,6 +20,7 @@ from src.adapters.base import (
     Cart,
     CartLine,
     CommerceAdapter,
+    FaqEntry,
     Product,
     ProductNotFoundError,
     PromoValidation,
@@ -28,6 +29,7 @@ from src.adapters.base import (
 from src.adapters.matching import token_matches_name, token_matches_product
 from src.agent.taxonomy_resolver import Candidate, ResolutionStatus, TaxonomyResolver
 from src.session.catalog_cache import CatalogSnapshotCache
+from src.session.faq_cache import FaqCache
 
 # The shopper-facing "can't reach the store's catalog" reply (dialogue.py) is deliberately
 # generic — a real customer during a real outage should never see internal config guidance.
@@ -121,15 +123,25 @@ class DiscoveryIntentHandler:
         adapter: CommerceAdapter,
         resolver: TaxonomyResolver,
         catalog_cache: Optional[CatalogSnapshotCache] = None,
+        faq_cache: Optional[FaqCache] = None,
     ) -> None:
         self._adapter = adapter
         self._resolver = resolver
         self._cache = catalog_cache or CatalogSnapshotCache()
+        self._faq_cache = faq_cache or FaqCache()
 
     def list_category_names(self) -> list[str]:
         """See TaxonomyResolver.list_category_names — real category grounding data for the
         LLM's context, not used by any deterministic resolution logic in this class."""
         return self._resolver.list_category_names()
+
+    def list_faqs(self) -> list[FaqEntry]:
+        """Real, admin-authored FAQ/policy content (login, shipping, returns, warranty, store
+        hours) for the LLM's grounding context — see FaqCache/CommerceAdapter.list_faqs. May
+        raise AdapterUnavailableError (e.g. the store's webservice key hasn't been granted
+        permission for this resource yet); callers on the best-effort context-enrichment path
+        should treat that as "nothing to add", same as list_category_names."""
+        return self._faq_cache.get_or_refresh(self._adapter).entries
 
     def handle_search(self, raw_text: str) -> DiscoveryOutcome:
         """Scenario 1 (category+constraint search), Scenario 3 (ambiguity), Scenario 4

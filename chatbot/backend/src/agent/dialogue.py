@@ -1214,6 +1214,18 @@ def _build_llm_context(session: ConversationSession, ctx: DialogueContext) -> di
         categories = []
     if categories:
         context["store_categories"] = categories
+    try:
+        # Real, confirmed live gap: policy questions (shipping, returns, login, warranty,
+        # store hours) always got a blanket "I don't have that information" even when the
+        # store had real, admin-authored content for exactly that question — grounding data
+        # so the LLM can answer honestly from it instead. Same best-effort degradation as
+        # categories above: a store with none configured (or without webservice permission
+        # for it yet) must not break every single turn.
+        faqs = ctx.discovery_handler.list_faqs()
+    except AdapterUnavailableError:
+        faqs = []
+    if faqs:
+        context["store_faqs"] = [{"question": f.question, "answer": f.answer} for f in faqs]
     if session.last_shown_products:
         context["last_shown_products"] = session.last_shown_products
     if session.pending_action is not None:

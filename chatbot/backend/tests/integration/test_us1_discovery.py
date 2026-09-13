@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.adapters.base import AttributeGroup, Category
+from src.adapters.base import AttributeGroup, Category, FaqEntry
 from src.adapters.mock import MockAdapter
 from src.agent.dialogue import DialogueContext, handle_turn
 from src.agent.intents import DiscoveryIntentHandler
@@ -316,6 +316,42 @@ def test_llm_context_includes_the_stores_real_categories(
 
     assert spy.last_context is not None
     assert set(spy.last_context.get("store_categories", [])) == {"T-Shirts", "Jackets"}
+
+
+def test_llm_context_includes_the_stores_real_faq_content(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    """Regression test for a real gap found reviewing the assistant's own tool definitions:
+    a shopper asking about shipping/returns/login always got a blanket "I don't have that
+    information" even when the store had real, admin-authored content for exactly that
+    question (PrestaShop's own CMS pages, read live via PrestaShopAdapter.list_faqs) — this
+    grounds the LLM in that real content instead."""
+    adapter.set_faqs([FaqEntry(question="Delivery", answer="Packages ship within 2 days via UPS.")])
+    spy = _ContextCapturingLLMClient(
+        ActionCall(action_type="ask_or_chat", parameters={"text": "Let me check that for you."})
+    )
+    ctx = _ctx(adapter, spy, session_store)
+
+    handle_turn(ctx, "s9c", "how long does shipping take?")
+
+    assert spy.last_context is not None
+    assert spy.last_context.get("store_faqs") == [
+        {"question": "Delivery", "answer": "Packages ship within 2 days via UPS."}
+    ]
+
+
+def test_llm_context_omits_store_faqs_when_the_store_has_none_configured(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    spy = _ContextCapturingLLMClient(
+        ActionCall(action_type="ask_or_chat", parameters={"text": "Let me check that for you."})
+    )
+    ctx = _ctx(adapter, spy, session_store)
+
+    handle_turn(ctx, "s9d", "how long does shipping take?")
+
+    assert spy.last_context is not None
+    assert "store_faqs" not in spy.last_context
 
 
 def test_a_real_search_result_is_remembered_as_context_for_the_next_turn(

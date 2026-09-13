@@ -316,6 +316,29 @@ def test_groq_client_context_warns_against_inventing_items_within_a_real_categor
     assert "inside a CLARIFYING QUESTION too" in content
 
 
+def test_groq_client_context_grounds_policy_questions_in_real_faq_content() -> None:
+    """Regression test for a real gap: a shopper asking a shipping/returns/login question
+    always got told "I don't have that information" even when the store had real,
+    admin-authored content for exactly that question — the rendered context must hand the
+    LLM that real answer and instruct it to use it rather than decline."""
+    seen_content = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen_content["user_message"] = body["messages"][1]["content"]
+        return _groq_response(name="ask_or_chat", arguments={"text": "Packages ship in 2 days!"})
+
+    client = FreeTierHostedLLMClient(api_key="fake-key", client=_mock_client(handler))
+    action = client.parse_turn(
+        "how long does shipping take?",
+        {"store_faqs": [{"question": "Delivery", "answer": "Packages ship within 2 days via UPS."}]},
+    )
+    assert action.action_type == "ask_or_chat"
+    content = seen_content["user_message"]
+    assert "Q: Delivery A: Packages ship within 2 days via UPS." in content
+    assert "never add, drop, or change a fact in it" in content
+
+
 def test_groq_client_returns_ask_or_chat_for_a_greeting() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)

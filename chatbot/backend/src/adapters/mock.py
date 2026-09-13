@@ -17,6 +17,7 @@ from src.adapters.base import (
     CartLine,
     CartStateChangedError,
     Category,
+    FaqEntry,
     Order,
     OutOfStockError,
     Product,
@@ -48,6 +49,7 @@ class MockAdapter:
         self._cart_version: dict[str, int] = {}  # bumped on every mutation, for staleness checks
         self._promo_rules: dict[str, _PromoRule] = {}
         self._orders: dict[str, Order] = {}
+        self._faqs: list[FaqEntry] = []
         self._simulate_unavailable = False
 
         self._seed_demo_catalog()
@@ -58,6 +60,13 @@ class MockAdapter:
         """Test-only helper: when True, every method raises AdapterUnavailableError,
         mirroring a real store backend that cannot be reached (research.md §8)."""
         self._simulate_unavailable = unavailable
+
+    def set_faqs(self, faqs: list[FaqEntry]) -> None:
+        """Test-only helper: seeds FAQ/policy content, mirroring what a real store's CMS
+        pages would provide via PrestaShopAdapter.list_faqs(). Empty ([]) by default, same
+        as a store with no CMS content configured — deliberately not seeded by
+        _seed_demo_catalog so existing tests aren't affected by this addition."""
+        self._faqs = list(faqs)
 
     def _check_available(self) -> None:
         if self._simulate_unavailable:
@@ -194,6 +203,10 @@ class MockAdapter:
     def list_attributes(self) -> list[AttributeGroup]:
         self._check_available()
         return list(self._attribute_groups.values())
+
+    def list_faqs(self) -> list[FaqEntry]:
+        self._check_available()
+        return list(self._faqs)
 
     def get_cart(self, session_id: str) -> Cart:
         self._check_available()

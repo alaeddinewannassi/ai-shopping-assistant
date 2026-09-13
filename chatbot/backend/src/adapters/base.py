@@ -56,6 +56,12 @@ class AttributeGroup:
 
 
 @dataclass
+class FaqEntry:
+    question: str
+    answer: str
+
+
+@dataclass
 class CartLine:
     product_id: str
     variant_id: str
@@ -162,6 +168,16 @@ class CommerceAdapter(Protocol):
 
     def list_attributes(self) -> list[AttributeGroup]:
         """Read-only. Backs the TaxonomyResolver (research.md §9, contracts/taxonomy-resolver.md)."""
+        ...
+
+    def list_faqs(self) -> list[FaqEntry]:
+        """Read-only. Real, admin-authored policy/FAQ content (login, shipping, returns,
+        warranty, store hours, etc.) grounding the assistant's answers to those questions
+        instead of the blanket "I don't have that information" it previously always gave —
+        see PrestaShopAdapter's own docstring for where this data actually comes from.
+        Returns [] when the store has none configured. Raises AdapterUnavailableError on
+        outage (including "permission not granted for this resource" — the caller's
+        best-effort context-enrichment path treats that the same as "nothing to add")."""
         ...
 
     def get_cart(self, session_id: str) -> Cart:

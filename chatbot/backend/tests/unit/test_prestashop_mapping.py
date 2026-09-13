@@ -223,6 +223,56 @@ def test_get_product_handles_the_plural_wrapped_display_full_response() -> None:
     assert product.variants[0].stock_quantity == 7
 
 
+# -- list_faqs (reads PrestaShop's own content_management_system / CMS pages) -------- #
+
+
+def test_list_faqs_maps_real_cms_pages_and_strips_html() -> None:
+    """Live-verified against a real PrestaShop instance: /api/content_management_system's
+    top-level key is the exact resource name (no trailing 's', unlike categories/products),
+    and meta_title/content come back as flat strings, not the multi-language list shape
+    other fields use — _localized already tolerates both."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/content_management_system"
+        return httpx.Response(200, json={"content_management_system": [
+            {
+                "id": 1,
+                "active": "1",
+                "meta_title": "Delivery",
+                "content": "<h2>Shipments</h2><p>Packages ship within 2 days via UPS.</p>",
+            },
+            {
+                "id": 2,
+                "active": "1",
+                "meta_title": "",
+                "content": "<p>A page with no title should be skipped.</p>",
+            },
+        ]})
+
+    adapter = _adapter_with_mock_transport(handler)
+    faqs = adapter.list_faqs()
+
+    assert len(faqs) == 1
+    assert faqs[0].question == "Delivery"
+    assert faqs[0].answer == "Shipments Packages ship within 2 days via UPS."
+
+
+def test_list_faqs_degrades_to_adapter_unavailable_when_permission_not_granted() -> None:
+    """Real, confirmed live gap: a webservice key's permissions are granted per-resource in
+    PrestaShop's own admin, and content_management_system is not one a key has by default —
+    until a merchant grants it, this must degrade the same way every other permission-denied
+    resource already does (test_get_converts_a_non_404_4xx_into_adapter_unavailable above),
+    not crash the turn."""
+    adapter = _adapter_with_mock_transport(
+        lambda r: httpx.Response(401, json={"errors": [{"code": 21, "message": "No permission"}]})
+    )
+    try:
+        adapter.list_faqs()
+    except AdapterUnavailableError:
+        pass
+    else:
+        raise AssertionError("expected AdapterUnavailableError")
+
+
 # -- cart_from_snapshot (specs/003-adversarial-qa-review: client-cart-sync) ----------- #
 #
 # Regression coverage for a real bug found via adversarial review: the chatbot's own

@@ -328,12 +328,15 @@ _TOOLS: list[dict[str, Any]] = [
                             "answering needs catalog data you don't already have, use "
                             "search_products or navigate_to instead of this tool. The same "
                             "goes for store policies — return window, shipping cost/time, "
-                            "warranty, payment methods, store hours, or any other operational "
-                            "detail: you have no real data for these, so NEVER invent specific "
-                            "numbers or terms (e.g. a made-up '30-day return window' or "
-                            "'3-5 business days'). Say honestly that you don't have that "
-                            "information on hand and suggest checking the store's own policy "
-                            "pages or contacting support directly. If the "
+                            "warranty, payment methods, store hours, login/account questions, "
+                            "or any other operational detail: if a '[Context: this store's "
+                            "FAQ/policy answers are: ...]' line above already answers it, use "
+                            "that real answer (you may rephrase it naturally, but never add, "
+                            "drop, or change a fact in it); otherwise you have no real data for "
+                            "it, so NEVER invent specific numbers or terms (e.g. a made-up "
+                            "'30-day return window' or '3-5 business days'). Say honestly that "
+                            "you don't have that information on hand and suggest checking the "
+                            "store's own policy pages or contacting support directly. If the "
                             "shopper asks about anything unrelated to shopping at this store "
                             "(politics, news, general trivia, other topics), do not answer "
                             "it — say briefly that you're only able to help with shopping "
@@ -362,9 +365,11 @@ know its contents, so never guess at examples within it. Pass the shopper's own 
 through in `raw_text`/`query`/`target` verbatim; the platform looks them up for real and will \
 ask a clarifying question if needed.
 - Never invent store policy details either — return windows, shipping cost/time, warranty, \
-payment methods, store hours. You have no real data for any of this. If asked, use \
-ask_or_chat and say honestly you don't have that information, rather than stating a specific \
-number or term you made up.
+payment methods, store hours, login/account help. If a "[Context: this store's FAQ/policy \
+answers are: ...]" line above already answers the question, use ask_or_chat and answer from \
+it (rephrase naturally, never add or change a fact in it). Otherwise you have no real data for \
+any of this — use ask_or_chat and say honestly you don't have that information, rather than \
+stating a specific number or term you made up.
 - Use confirm_pending_action / decline_pending_action ONLY when the context says a pending \
 action exists, and only when the shopper is actually agreeing or declining it.
 - If the context says you just asked which size/color the shopper wants, and their message \
@@ -452,6 +457,16 @@ def _build_user_content(message: str, context: dict) -> str:
             "ask what they're looking for in their own words, with no example item types of "
             "your own; only name specific items if they were given to you verbatim in another "
             "[Context: ...] line above]"
+        )
+    faqs = context.get("store_faqs")
+    if faqs:
+        rendered = "; ".join(f"Q: {f['question']} A: {f['answer']}" for f in faqs)
+        lines.append(
+            f"[Context: this store's FAQ/policy answers are: {rendered} — if the shopper's "
+            "question matches one of these, use ask_or_chat and answer from it (rephrase "
+            "naturally, but never add, drop, or change a fact in it); if it asks about "
+            "something none of these cover, you still have no real data for it, so say so "
+            "honestly rather than inventing an answer]"
         )
     last_shown = context.get("last_shown_products")
     if last_shown:

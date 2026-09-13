@@ -41,6 +41,7 @@ from src.adapters.base import (
     CartLine,
     CartStateChangedError,
     Category,
+    FaqEntry,
     Order,
     OutOfStockError,
     Product,
@@ -356,6 +357,28 @@ class PrestaShopAdapter:
             ]
             groups.append(AttributeGroup(name=name, values=[v for v in values if v]))
         return groups
+
+    def list_faqs(self) -> list[FaqEntry]:
+        """Reads PrestaShop's own `content_management_system` resource — the same CMS pages
+        a merchant already writes for "Delivery", "Terms and conditions", "About us", etc. No
+        separate FAQ table/sync exists (or is needed): this stays live/authoritative in
+        PrestaShop, read the same way promo cart-rules are (see apply_promo/_find_cart_rule),
+        never mirrored into tenant-db. Real, confirmed live gap: a webservice key's
+        permissions are granted per-resource in PrestaShop's own admin (Advanced Parameters ->
+        Webservice -> the key -> "Content management system" row), and this resource is not
+        one of the ones a key is set up for by default — until a merchant grants it, this
+        raises AdapterUnavailableError via `_get`'s existing 401 handling, which the caller's
+        best-effort context-enrichment path already treats as "nothing to add" (same as an
+        actual outage), not a crash."""
+        data = self._get("/api/content_management_system", {"display": "full", "filter[active]": "1"})
+        raw = self._as_list(data, "content_management_system", "content_management_system")
+        entries: list[FaqEntry] = []
+        for c in raw:
+            question = _localized(c.get("meta_title"), self._lang_id).strip()
+            answer = _strip_html(_localized(c.get("content"), self._lang_id)).strip()
+            if question and answer:
+                entries.append(FaqEntry(question=question, answer=answer))
+        return entries
 
     def get_cart(self, session_id: str) -> Cart:
         id_cart = self._get_or_create_ps_cart(session_id)

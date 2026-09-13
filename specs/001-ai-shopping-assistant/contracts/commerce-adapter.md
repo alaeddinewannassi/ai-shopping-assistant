@@ -47,6 +47,20 @@ below against the dockerized PrestaShop reference store (plus the Mock, for fast
   values actually in use (e.g., group "Color" → `["Red", "Burgundy", "Blue"]`). Same caching/
   resolver/failure semantics as `list_categories()` above.
 
+## `list_faqs() -> list[FaqEntry]`
+
+- **Contract**: read-only; returns real, admin-authored FAQ/policy content (login, shipping,
+  returns, warranty, store hours, etc.) so the assistant can answer these honestly instead of
+  always declining. For `PrestaShopAdapter`, this reads PrestaShop's own
+  `content_management_system` webservice resource (the same CMS pages a merchant already
+  writes for "Delivery", "Terms and conditions", etc.) — stays live/authoritative in
+  PrestaShop, never mirrored into tenant-db, same principle as promo cart-rule codes. Returns
+  `[]` when the store has none configured. Raises `AdapterUnavailableError` on transport/
+  timeout failure, including a webservice key that hasn't been granted permission for this
+  resource yet (a real, confirmed live case — PrestaShop grants webservice permissions
+  per-resource) — the dialogue layer's best-effort context-enrichment path treats that the
+  same as "nothing to add," not a failed turn.
+
 ## `get_cart(session_id: str) -> Cart`
 
 - **Contract**: read-only; creates an empty Cart on first access if none exists yet for the
