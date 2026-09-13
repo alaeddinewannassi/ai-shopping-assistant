@@ -55,6 +55,15 @@ from src.adapters.resilience import CircuitBreaker, CircuitBreakerConfig, defaul
 
 _NO_COMBINATION_ATTR_ID = 0  # PrestaShop convention: id_product_attribute=0 means "the product itself"
 
+# list_faqs's title allowlist — a store's CMS category almost always also has generic
+# boilerplate (About us, Legal Notice, Terms and conditions) alongside real operational
+# pages; only the latter are worth the token cost of grounding context on every turn.
+_FAQ_TITLE_KEYWORDS = (
+    "delivery", "shipping", "return", "refund", "exchange", "warranty", "guarantee",
+    "payment", "secure", "faq", "help", "contact", "hours", "support",
+)
+_FAQ_MAX_ANSWER_CHARS = 500
+
 
 class _TransportError(Exception):
     """Internal marker: a genuine transport/timeout/5xx failure, reclassified into
@@ -369,14 +378,24 @@ class PrestaShopAdapter:
         one of the ones a key is set up for by default — until a merchant grants it, this
         raises AdapterUnavailableError via `_get`'s existing 401 handling, which the caller's
         best-effort context-enrichment path already treats as "nothing to add" (same as an
-        actual outage), not a crash."""
+        actual outage), not a crash.
+
+        Filtered to pages that look like an actual operational policy a shopper might ask
+        about, and capped per-answer length. Real, confirmed live gap: sending every CMS
+        page's full text as grounding context on EVERY turn — including generic "About us"/
+        "Terms and conditions of use"/"Legal Notice" boilerplate nobody asks a shopping
+        assistant about — cost ~1000 tokens per message regardless of relevance. A single
+        greeting followed by one product question was enough to exhaust the free tier's
+        8000-tokens/minute bucket and rate-limit the next ~15 minutes of real shoppers."""
         data = self._get("/api/content_management_system", {"display": "full", "filter[active]": "1"})
         raw = self._as_list(data, "content_management_system", "content_management_system")
         entries: list[FaqEntry] = []
         for c in raw:
             question = _localized(c.get("meta_title"), self._lang_id).strip()
-            answer = _strip_html(_localized(c.get("content"), self._lang_id)).strip()
-            if question and answer:
+            if not question or not any(kw in question.lower() for kw in _FAQ_TITLE_KEYWORDS):
+                continue
+            answer = _strip_html(_localized(c.get("content"), self._lang_id)).strip()[:_FAQ_MAX_ANSWER_CHARS]
+            if answer:
                 entries.append(FaqEntry(question=question, answer=answer))
         return entries
 

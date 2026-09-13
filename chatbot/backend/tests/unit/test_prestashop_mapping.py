@@ -256,6 +256,32 @@ def test_list_faqs_maps_real_cms_pages_and_strips_html() -> None:
     assert faqs[0].answer == "Shipments Packages ship within 2 days via UPS."
 
 
+def test_list_faqs_filters_out_generic_boilerplate_pages_and_caps_answer_length() -> None:
+    """Regression test for a real, confirmed live gap: sending every CMS page's full text as
+    grounding context on EVERY turn — including generic "About us"/"Terms and conditions of
+    use"/"Legal Notice" boilerplate no shopper asks a shopping assistant about — cost ~1000
+    tokens per message regardless of relevance. A single greeting followed by one product
+    question was enough to exhaust the free tier's 8000-tokens/minute bucket and rate-limit
+    the next ~15 minutes of real shoppers. Only pages that look like an actual operational
+    policy should ride along, and even those must have a bounded length."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"content_management_system": [
+            {"id": 1, "meta_title": "Delivery", "content": "Ships in 2 days."},
+            {"id": 2, "meta_title": "Legal Notice", "content": "Credits and legal info."},
+            {"id": 3, "meta_title": "Terms and conditions of use", "content": "Rule 1..."},
+            {"id": 4, "meta_title": "About us", "content": "Our company story."},
+            {"id": 5, "meta_title": "Secure payment", "content": "x" * 1000},
+        ]})
+
+    adapter = _adapter_with_mock_transport(handler)
+    faqs = adapter.list_faqs()
+
+    questions = {f.question for f in faqs}
+    assert questions == {"Delivery", "Secure payment"}
+    payment_faq = next(f for f in faqs if f.question == "Secure payment")
+    assert len(payment_faq.answer) == 500
+
+
 def test_list_faqs_degrades_to_adapter_unavailable_when_permission_not_granted() -> None:
     """Real, confirmed live gap: a webservice key's permissions are granted per-resource in
     PrestaShop's own admin, and content_management_system is not one a key has by default —
