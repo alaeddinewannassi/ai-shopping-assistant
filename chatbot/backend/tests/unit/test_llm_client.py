@@ -287,6 +287,7 @@ def test_groq_client_context_warns_against_inventing_items_within_a_real_categor
     content = seen_content["user_message"]
     assert "Accessories" in content
     assert "never illustrate it with invented item types" in content
+    assert "inside a CLARIFYING QUESTION too" in content
 
 
 def test_groq_client_returns_ask_or_chat_for_a_greeting() -> None:

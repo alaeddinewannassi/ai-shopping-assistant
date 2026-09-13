@@ -446,8 +446,11 @@ def _build_user_content(message: str, context: dict) -> str:
             "WITHIN a real category — you do not know what that category actually contains, "
             "so never illustrate it with invented item types either (e.g. don't say an "
             "Accessories category \"has things like scarves, phone cases, or jewelry\" — you "
-            "have no idea if it does). Name the real category and invite them to look or tell "
-            "you more; only name specific items if they were given to you verbatim in another "
+            "have no idea if it does). This includes inside a CLARIFYING QUESTION too — never "
+            "ask \"what type of accessory, like bags, hats, or jewelry?\" either, since that "
+            "still states as fact that those item types exist here. Name the real category and "
+            "ask what they're looking for in their own words, with no example item types of "
+            "your own; only name specific items if they were given to you verbatim in another "
             "[Context: ...] line above]"
         )
     last_shown = context.get("last_shown_products")
