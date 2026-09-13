@@ -29,7 +29,11 @@ from tenancy_db.models.analytics import AssistantEvent, ConversationSessionRecor
 # provider). That specific failure showed up in a real session's raw event log, gracefully
 # recovered from at the shopper-facing level (a safe fallback reply, no crash) — but Overview's
 # error_rate stayed at 0%, hiding a real infrastructure problem an admin should see.
-_ERROR_OUTCOMES = {"unavailable", "error"}
+# "rate_limited" (llm_client.py's _RateLimitExceededError) is its own distinct outcome, not
+# folded into "error" — it isn't a bug, it's Groq's free-tier allowance being temporarily
+# exhausted — but it still means a shopper's turn didn't get real LLM help, which an admin
+# genuinely needs visibility into (it's actionable: reduce traffic, switch model, or upgrade).
+_ERROR_OUTCOMES = {"unavailable", "error", "rate_limited"}
 
 _MUTATION_ACTION_TYPES = {"add_cart_item", "update_cart_item", "remove_cart_item", "apply_promo"}
 

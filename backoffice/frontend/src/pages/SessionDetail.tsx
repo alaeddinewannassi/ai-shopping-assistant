@@ -6,6 +6,8 @@ import { useSelectedTenant } from "../lib/auth";
 const OUTCOME_TONE: Record<string, string> = {
   success: "var(--good)",
   unavailable: "var(--critical)",
+  error: "var(--critical)",
+  rate_limited: "var(--warning)",
   out_of_stock: "var(--warning)",
   declined: "var(--text-secondary)",
 };
@@ -39,8 +41,21 @@ export function SessionDetail() {
           // not prose, so JSON stays the right format for it.
           const message = typeof event.details.message === "string" ? event.details.message : null;
           const reply = typeof event.details.reply === "string" ? event.details.reply : null;
+          // Real, confirmed live gap: a rate-limited LLM call used to dump a raw httpx
+          // exception string (a full URL, an embedded newline) into this event's details —
+          // unreadable as anything other than a generic "error", and long/unbroken enough to
+          // force this whole page into horizontal scroll. llm_client.py now logs a clean,
+          // distinct "rate_limited" outcome instead; render it as one plain sentence, the
+          // same treatment as the message/reply block above, not a raw JSON dump.
+          const isRateLimited = event.outcome === "rate_limited";
+          const retryAfter = event.details.retry_after_seconds;
           const otherDetails = Object.fromEntries(
-            Object.entries(event.details).filter(([key]) => key !== "message" && key !== "reply"),
+            Object.entries(event.details).filter(
+              ([key]) =>
+                key !== "message" &&
+                key !== "reply" &&
+                !(isRateLimited && (key === "reason" || key === "retry_after_seconds")),
+            ),
           );
 
           return (
@@ -56,7 +71,7 @@ export function SessionDetail() {
                 gap: 12,
               }}
             >
-              <div>
+              <div style={{ minWidth: 0, flex: "1 1 auto" }}>
                 <div style={{ fontWeight: 600 }}>{event.intent}</div>
                 <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>
                   {event.action} · {new Date(event.occurred_at).toLocaleTimeString()}
@@ -78,8 +93,23 @@ export function SessionDetail() {
                     )}
                   </div>
                 )}
+                {isRateLimited && (
+                  <div style={{ fontSize: 13, margin: "6px 0 0", color: "var(--warning)" }}>
+                    ⏱ Groq free-tier rate limit reached for this model — a safe fallback action
+                    was used instead
+                    {typeof retryAfter === "number" && ` (retry after ~${Math.round(retryAfter)}s)`}.
+                  </div>
+                )}
                 {Object.keys(otherDetails).length > 0 && (
-                  <pre style={{ fontSize: 12, margin: "4px 0 0", color: "var(--text-muted)" }}>
+                  <pre
+                    style={{
+                      fontSize: 12,
+                      margin: "4px 0 0",
+                      color: "var(--text-muted)",
+                      whiteSpace: "pre-wrap",
+                      overflowWrap: "anywhere",
+                    }}
+                  >
                     {JSON.stringify(otherDetails)}
                   </pre>
                 )}
@@ -88,6 +118,7 @@ export function SessionDetail() {
                 style={{
                   color: OUTCOME_TONE[event.outcome] ?? "var(--text-primary)",
                   fontWeight: 600,
+                  flexShrink: 0,
                 }}
               >
                 {event.outcome}

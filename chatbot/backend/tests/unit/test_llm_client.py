@@ -256,6 +256,35 @@ def test_groq_client_logs_an_error_event_on_fallback(monkeypatch: pytest.MonkeyP
     assert logged["outcome"] == "error"
 
 
+def test_groq_client_logs_a_clean_rate_limited_outcome_when_retries_are_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test for a real, confirmed live gap: an exhausted-retry 429 used to be
+    logged as a generic "error" outcome carrying a raw httpx exception string ("Client error
+    '429 Too Many Requests' for url 'https://api.groq.com/...'\\nFor more information check:
+    ...") — unreadable to an admin as anything other than an unexplained failure, and long/
+    unbroken enough to force the backoffice session page into horizontal scroll. It must now
+    be a distinct "rate_limited" outcome with a short, clean reason instead."""
+    logged = {}
+
+    def fake_log_action(session_id, intent, action, outcome, *, details=None):
+        logged.update(session_id=session_id, intent=intent, outcome=outcome, details=details)
+
+    monkeypatch.setattr("src.logging.audit.log_action", fake_log_action)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"retry-after": "0"})
+
+    client = FreeTierHostedLLMClient(api_key="fake-key", client=_mock_client(handler))
+    action = client.parse_turn("hello", {}, session_id="session-43")
+
+    assert action.action_type == "search_products"  # safe fallback, turn never breaks
+    assert logged["outcome"] == "rate_limited"
+    assert logged["details"]["retry_after_seconds"] == 0.0
+    assert "429 Too Many Requests" not in json.dumps(logged["details"])
+    assert "api.groq.com" not in json.dumps(logged["details"])
+
+
 def test_groq_client_context_includes_pending_action_for_the_model() -> None:
     seen_content = {}
 

@@ -497,6 +497,22 @@ def _as_float(value: Any, default: float) -> float:
         return default
 
 
+class _RateLimitExceededError(Exception):
+    """Internal marker: Groq's free-tier rate limit was still in effect after
+    _post_with_retry's one retry — distinct from an arbitrary/unexpected failure so
+    _log_error can report it as an honest, distinctly-labeled "rate_limited" outcome
+    instead of dumping a raw httpx exception string (containing a full URL and an embedded
+    newline) into the event log. Real, confirmed live gap: a session's event log showed
+    "Client error '429 Too Many Requests' for url 'https://api.groq.com/...'\\nFor more
+    information check: ..." repeated verbatim on every throttled turn — unreadable to an
+    admin as anything other than a generic, unexplained "error", and long/unbroken enough to
+    force the backoffice session page into horizontal scroll."""
+
+    def __init__(self, retry_after_seconds: float | None) -> None:
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__("Groq free-tier rate limit reached")
+
+
 class FreeTierHostedLLMClient:
     """Groq's free-tier, OpenAI-compatible tool-calling API (research.md §3a).
 
@@ -552,6 +568,8 @@ class FreeTierHostedLLMClient:
         start = time.monotonic()
         response = self._post_with_retry(payload, headers)
         elapsed_ms = int((time.monotonic() - start) * 1000)
+        if response.status_code == 429:
+            raise _RateLimitExceededError(_as_float(response.headers.get("retry-after"), None))
         response.raise_for_status()
         data = response.json()
 
@@ -610,6 +628,22 @@ class FreeTierHostedLLMClient:
             return
         from src.logging.audit import log_action
 
+        if isinstance(exc, _RateLimitExceededError):
+            # Distinct from a generic "error" outcome: this isn't a bug, it's Groq's
+            # free-tier request/token allowance for this model being temporarily exhausted —
+            # an admin reading the session log should be able to tell the difference at a
+            # glance instead of getting a raw, URL-bearing httpx exception string.
+            log_action(
+                session_id,
+                "llm_call",
+                action,
+                "rate_limited",
+                details={
+                    "reason": "Groq free-tier rate limit reached for this model",
+                    "retry_after_seconds": exc.retry_after_seconds,
+                },
+            )
+            return
         log_action(session_id, "llm_call", action, "error", details={"error": str(exc)[:500]})
 
     def phrase_reply(
@@ -635,6 +669,8 @@ class FreeTierHostedLLMClient:
         start = time.monotonic()
         response = self._post_with_retry(payload, headers)
         elapsed_ms = int((time.monotonic() - start) * 1000)
+        if response.status_code == 429:
+            raise _RateLimitExceededError(_as_float(response.headers.get("retry-after"), None))
         response.raise_for_status()
         data = response.json()
 

@@ -227,3 +227,23 @@ def test_empty_range_returns_zeroed_metrics_not_a_crash(db) -> None:
     assert overview.checkout_rate == 0.0
     assert overview.avg_turn_latency_ms is None
     assert overview.error_rate == 0.0
+
+
+def test_rate_limited_llm_calls_count_toward_error_rate(db) -> None:
+    """Regression test for a real gap: llm_client.py now logs a throttled-Groq-quota turn as
+    its own distinct "rate_limited" outcome (not a generic "error") so an admin can tell a
+    free-tier rate limit apart from a genuine bug — but it still means a shopper's turn didn't
+    get real LLM help, so it must still count toward error_rate, not silently disappear."""
+    tenant_id = uuid.uuid4()
+    t1 = uuid.uuid4()
+    events = [
+        _event(tenant_id, "s1", t1, 0, "llm_call", "parse_turn", "rate_limited"),
+        _event(tenant_id, "s1", t1, 1, "search_products", "search_products", "products"),
+        _event(tenant_id, "s1", t1, 2, "turn_completed", "turn_completed", "ok", elapsed_ms=50),
+    ]
+    db.add_all(events)
+    db.commit()
+
+    overview = get_overview(db, tenant_id, _NOW - timedelta(hours=1), _NOW + timedelta(hours=1))
+    assert overview.error_event_count == 1
+    assert overview.error_rate == pytest.approx(1 / 2)  # 2 non-turn_completed events, 1 is an error
