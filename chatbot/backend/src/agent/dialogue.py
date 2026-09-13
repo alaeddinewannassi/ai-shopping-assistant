@@ -845,6 +845,7 @@ def _handle_confirm(ctx: DialogueContext, session_id: str) -> ConfirmOutcome:
     if (
         pending.action_type in {"add_cart_item", "update_cart_item", "remove_cart_item"}
         and session.client_cart_discount
+        and result.cart.lines  # an empty cart has nothing left for a discount to apply to
     ):
         # Real, confirmed live bug: a line-item change's predicted post-mutation cart (built
         # from the pre-mutation snapshot, before the widget's real write even happens) has no

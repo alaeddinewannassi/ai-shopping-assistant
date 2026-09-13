@@ -144,6 +144,35 @@ def test_confirmed_line_item_change_never_states_a_stale_discount_amount() -> No
     assert "check your cart" in reply.lower()
 
 
+def test_removing_the_last_item_never_claims_a_discount_still_applies() -> None:
+    """Regression test for a real, confirmed live bug: removing the only item in the cart
+    left the honest discount-qualifier firing anyway ("Your cart is now empty. Your discount
+    code (WELCOME10) still applies...") — nonsensical once there's nothing left to discount."""
+    adapter = _ClientSyncAdapter()
+    session_store = SessionStore(redis_url=None)
+    llm_client = _ScriptedLLMClient(
+        ActionCall(
+            action_type="propose_remove_from_cart",
+            parameters={"raw_text": "remove the classic t-shirt"},
+        )
+    )
+    ctx = _ctx(adapter, llm_client, session_store)
+
+    handle_turn(
+        ctx, "s8", "remove the classic t-shirt",
+        cart_snapshot=[{"variant_id": "prod-tshirt-1#var-tshirt-1-red-m", "quantity": 1}],
+        cart_discount={"code": "WELCOME10", "amount": 2.0},
+    )
+    reply = handle_turn(
+        ctx, "s8", "yes",
+        cart_snapshot=[{"variant_id": "prod-tshirt-1#var-tshirt-1-red-m", "quantity": 1}],
+        cart_discount={"code": "WELCOME10", "amount": 2.0},
+    )
+
+    assert reply == "Your cart is now empty."
+    assert "WELCOME10" not in reply
+
+
 def test_a_caller_that_never_sends_a_snapshot_keeps_todays_backend_owned_cart_behavior() -> None:
     """A non-browser API caller (curl, a script, a mobile app with no PrestaShop session)
     must be completely unaffected by client-cart-sync — this is opt-in per session, driven
