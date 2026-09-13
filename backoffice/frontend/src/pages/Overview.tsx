@@ -4,14 +4,29 @@ import { api } from "../lib/api";
 import { useSelectedTenant } from "../lib/auth";
 import { StatTile } from "../components/StatTile";
 import { DateRangePicker, defaultRange, type DateRange } from "../components/DateRangePicker";
+import { TimeseriesChart } from "../components/TimeseriesChart";
+
+type TrendMetric = "session_count" | "turn_count";
+
+const TREND_METRICS: { key: TrendMetric; label: string }[] = [
+  { key: "session_count", label: "Sessions" },
+  { key: "turn_count", label: "Turns" },
+];
 
 export function Overview() {
   const [tenantId] = useSelectedTenant();
   const [range, setRange] = useState<DateRange>(defaultRange());
+  const [trendMetric, setTrendMetric] = useState<TrendMetric>("session_count");
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["overview", tenantId, range.start, range.end],
     queryFn: () => api.getOverview(tenantId!, range.start, range.end),
+    enabled: !!tenantId,
+  });
+
+  const { data: trend } = useQuery({
+    queryKey: ["overview-timeseries", tenantId, range.start, range.end],
+    queryFn: () => api.getTimeseries(tenantId!, range.start, range.end),
     enabled: !!tenantId,
   });
 
@@ -64,6 +79,50 @@ export function Overview() {
             label="Error rate"
             value={`${(data.error_rate * 100).toFixed(1)}%`}
             tone={data.error_rate > 0.05 ? "critical" : "default"}
+          />
+        </div>
+      )}
+
+      {trend && (
+        <div
+          style={{
+            marginTop: 24,
+            padding: 16,
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            background: "var(--surface-1)",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              marginBottom: 16,
+            }}
+          >
+            <h2 style={{ margin: 0, fontSize: 16 }}>Trend</h2>
+            <div style={{ display: "flex", gap: 8 }}>
+              {TREND_METRICS.map((m) => (
+                <button
+                  key={m.key}
+                  onClick={() => setTrendMetric(m.key)}
+                  style={{
+                    padding: "6px 12px",
+                    borderRadius: 6,
+                    border: "1px solid var(--border)",
+                    background: trendMetric === m.key ? "var(--series-1)" : "var(--surface-1)",
+                    color: trendMetric === m.key ? "#fff" : "var(--text-primary)",
+                  }}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <TimeseriesChart
+            points={trend.map((p) => ({ date: p.date, value: p[trendMetric] }))}
+            label={`${TREND_METRICS.find((m) => m.key === trendMetric)!.label} per day`}
           />
         </div>
       )}

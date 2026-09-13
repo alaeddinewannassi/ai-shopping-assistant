@@ -9,8 +9,10 @@ info:
     therefore not yet implemented: TOTP/MFA (T502's optional part), adapter/LLM
     "Test connection" (needs either a shared adapter package with chatbot/backend or an
     internal-only check — an open design question, not silently skipped, see plan.md), user/
-    membership invitations (T508), CSV/JSON export (T510), timeseries/breakdowns/cost
-    analytics (blocked on Phase 4's deferred rollup tables).
+    membership invitations (T508), CSV/JSON export (T510), breakdowns/cost analytics
+    (blocked on Phase 4's deferred rollup tables). `analytics/timeseries` WAS on that
+    deferred list too but got added on the same raw-scan basis as overview/funnel — see its
+    own operation summary below.
 
     Every mutating endpoint writes an `admin_audit` row (T509) — not modeled explicitly here
     since it's a side effect, not part of the request/response contract.
@@ -302,6 +304,26 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/FunnelMetrics" }
 
+  /tenants/{tenant_id}/analytics/timeseries:
+    parameters:
+      - $ref: "#/components/parameters/TenantId"
+      - $ref: "#/components/parameters/Start"
+      - $ref: "#/components/parameters/End"
+    get:
+      operationId: getAnalyticsTimeseries
+      summary: >-
+        Daily sessions/turns trend for the Overview chart (owner/admin/analyst). Was
+        deferred pending Phase 4's rollup tables in the original plan; added anyway on the
+        same raw-scan basis as overview/funnel — fine at this project's current event
+        volume, see queries.get_timeseries's docstring.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/DailyPoint" }
+
   /tenants/{tenant_id}/sessions:
     parameters:
       - $ref: "#/components/parameters/TenantId"
@@ -485,6 +507,13 @@ components:
         cart_mutated: { type: integer }
         checkout_proposed: { type: integer }
         ordered: { type: integer }
+
+    DailyPoint:
+      type: object
+      properties:
+        date: { type: string, format: date }
+        session_count: { type: integer }
+        turn_count: { type: integer }
 
     SessionSummary:
       type: object

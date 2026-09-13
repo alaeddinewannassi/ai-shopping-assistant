@@ -70,6 +70,12 @@ export interface FunnelMetrics {
   ordered: number;
 }
 
+export interface DailyPoint {
+  date: string; // ISO calendar date, YYYY-MM-DD
+  session_count: number;
+  turn_count: number;
+}
+
 export interface SessionSummary {
   session_id: string;
   started_at: string;
@@ -156,6 +162,10 @@ export const api = {
   getFunnel: (tenantId: string, start: string, end: string) =>
     request<FunnelMetrics>(
       `/tenants/${tenantId}/analytics/funnel?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`,
+    ),
+  getTimeseries: (tenantId: string, start: string, end: string) =>
+    request<DailyPoint[]>(
+      `/tenants/${tenantId}/analytics/timeseries?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`,
     ),
 
   listSessions: (tenantId: string, opts?: { limit?: number; outcome?: string }) => {

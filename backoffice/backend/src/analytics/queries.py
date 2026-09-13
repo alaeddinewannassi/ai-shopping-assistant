@@ -6,14 +6,16 @@ analytics_daily tables and T402's scheduler aren't built — see
 specs/002-backoffice-analytics/plan.md's Phase 4 status). Every function here scans raw
 events directly, which is always correct and simple, just not yet optimized for large date
 ranges — the honest, testable building block D5's rollup-vs-raw routing would eventually
-sit in front of.
+sit in front of. `get_timeseries` below was added the same way (raw scan, correct now,
+same optimization opportunity later) rather than waiting on that deferred infrastructure —
+see its own docstring.
 """
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
@@ -48,6 +50,13 @@ class FunnelMetrics:
     cart_mutated: int
     checkout_proposed: int
     ordered: int
+
+
+@dataclass
+class DailyPoint:
+    date: str  # ISO calendar date (YYYY-MM-DD), tenant-agnostic UTC day boundary
+    session_count: int
+    turn_count: int
 
 
 def get_overview(db: Session, tenant_id: uuid.UUID, start: datetime, end: datetime) -> OverviewMetrics:
@@ -112,6 +121,49 @@ def get_funnel(db: Session, tenant_id: uuid.UUID, start: datetime, end: datetime
         checkout_proposed=len(checkout_proposed),
         ordered=ordered,
     )
+
+
+def get_timeseries(db: Session, tenant_id: uuid.UUID, start: datetime, end: datetime) -> list[DailyPoint]:
+    """Sessions/turns per calendar day for `[start, end]` — added so the Overview page can
+    plot a trend instead of one flat aggregate for the whole selected range, which was the
+    single biggest gap found reviewing the dashboard live: an admin had no way to tell
+    whether activity was growing, shrinking, or when within the period something changed.
+
+    One point per UTC calendar day, inclusive of both endpoints' dates, with explicit
+    zero-fill for days with no activity — a chart needs an evenly-spaced x-axis, not just
+    the days that happened to have events. `session_count` counts a session on every day it
+    had ANY event (matching get_overview's own "distinct session_id in range" definition);
+    `turn_count` counts turn_completed events specifically, also matching get_overview.
+
+    Same raw-scan approach as get_overview/get_funnel above (correct now, not yet optimized
+    for a large date range — see this module's docstring), not the deferred rollup-table
+    routing this project's contract originally reserved timeseries for. That infrastructure
+    doesn't exist yet, and at this project's current event volume a raw scan costs nothing
+    a shopper or admin would notice; swapping the query underneath is a later, separate
+    optimization, not a reason to withhold the chart today."""
+    events = _events_in_range(db, tenant_id, start, end)
+    sessions_by_day: dict[str, set[str]] = {}
+    turns_by_day: dict[str, int] = {}
+    for e in events:
+        day = e.occurred_at.date().isoformat()
+        sessions_by_day.setdefault(day, set()).add(e.session_id)
+        if e.intent == "turn_completed":
+            turns_by_day[day] = turns_by_day.get(day, 0) + 1
+
+    points: list[DailyPoint] = []
+    current = start.date()
+    last_day = end.date()
+    while current <= last_day:
+        key = current.isoformat()
+        points.append(
+            DailyPoint(
+                date=key,
+                session_count=len(sessions_by_day.get(key, ())),
+                turn_count=turns_by_day.get(key, 0),
+            )
+        )
+        current += timedelta(days=1)
+    return points
 
 
 def _events_in_range(

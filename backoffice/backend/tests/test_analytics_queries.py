@@ -16,7 +16,7 @@ from sqlalchemy.orm import sessionmaker
 from tenancy_db.base import Base
 from tenancy_db.models.analytics import AssistantEvent, ConversationSessionRecord
 
-from src.analytics.queries import get_funnel, get_overview
+from src.analytics.queries import DailyPoint, get_funnel, get_overview, get_timeseries
 
 _NOW = datetime(2026, 8, 29, 12, 0, 0, tzinfo=UTC)
 
@@ -135,6 +135,67 @@ def test_overview_and_funnel_numbers_match_hand_computed_expectations(db) -> Non
     assert overview.error_event_count == 1  # s3's "unavailable" search
     non_turn_total = sum(1 for e in events if e.tenant_id == tenant_id and e.intent != "turn_completed")
     assert overview.error_rate == pytest.approx(1 / non_turn_total)
+
+
+def test_timeseries_buckets_by_day_and_zero_fills_days_with_no_activity(db) -> None:
+    """Regression-shaped test for the actual gap found reviewing the live dashboard: Overview
+    only ever showed one flat number for the whole selected range, with no way to tell which
+    day within it had more or less activity. Two sessions active on different days, plus a
+    day with no events at all in between, must all show up as distinct, correctly-zeroed
+    points — a chart needs an evenly-spaced x-axis, not just the days that happened to have
+    events."""
+    tenant_id = uuid.uuid4()
+    day1 = datetime(2026, 8, 27, 10, 0, 0, tzinfo=UTC)
+    day3 = datetime(2026, 8, 29, 15, 0, 0, tzinfo=UTC)  # day2 (8/28) has no events at all
+
+    t1a, t1b = uuid.uuid4(), uuid.uuid4()
+    events = [
+        _event(tenant_id, "s1", t1a, 0, "search_products", "search_products", "products"),
+        _event(tenant_id, "s1", t1a, 1, "turn_completed", "turn_completed", "ok", elapsed_ms=100),
+        _event(tenant_id, "s1", t1b, 0, "search_products", "search_products", "products"),
+    ]
+    events[0].occurred_at = day1
+    events[1].occurred_at = day1
+    events[2].occurred_at = day1
+
+    t2a, t2b = uuid.uuid4(), uuid.uuid4()
+    more_events = [
+        _event(tenant_id, "s2", t2a, 0, "search_products", "search_products", "products"),
+        _event(tenant_id, "s2", t2a, 1, "turn_completed", "turn_completed", "ok", elapsed_ms=50),
+        _event(tenant_id, "s3", t2b, 0, "search_products", "search_products", "products"),
+        _event(tenant_id, "s3", t2b, 1, "turn_completed", "turn_completed", "ok", elapsed_ms=50),
+    ]
+    for e in more_events:
+        e.occurred_at = day3
+    events += more_events
+
+    db.add_all(events)
+    db.commit()
+
+    points = get_timeseries(db, tenant_id, day1 - timedelta(hours=1), day3 + timedelta(hours=1))
+
+    assert [p.date for p in points] == ["2026-08-27", "2026-08-28", "2026-08-29"]
+    assert points[0].session_count == 1  # s1 only
+    assert points[0].turn_count == 1
+    assert points[1].session_count == 0  # zero-filled — no events that day
+    assert points[1].turn_count == 0
+    assert points[2].session_count == 2  # s2 and s3
+    assert points[2].turn_count == 2
+
+
+def test_timeseries_never_leaks_another_tenants_events(db) -> None:
+    tenant_id = uuid.uuid4()
+    other_tenant_id = uuid.uuid4()
+    day = datetime(2026, 8, 27, 10, 0, 0, tzinfo=UTC)
+
+    t = uuid.uuid4()
+    e = _event(other_tenant_id, "s1", t, 0, "search_products", "search_products", "products")
+    e.occurred_at = day
+    db.add(e)
+    db.commit()
+
+    points = get_timeseries(db, tenant_id, day - timedelta(hours=1), day + timedelta(hours=1))
+    assert points == [DailyPoint(date="2026-08-27", session_count=0, turn_count=0)]
 
 
 def test_empty_range_returns_zeroed_metrics_not_a_crash(db) -> None:
