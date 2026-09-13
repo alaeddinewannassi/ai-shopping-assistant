@@ -345,6 +345,42 @@ def test_hyphenless_product_name_correctly_narrows_to_one_match(adapter: MockAda
     assert resolution.product.name == "Classic T-Shirt"
 
 
+def test_updating_a_cart_line_is_not_confused_by_a_product_name_starting_with_the(
+    adapter: MockAdapter,
+) -> None:
+    """Regression test for a real, confirmed live bug: resolve_cart_line_reference's own
+    name-token filter only excluded words of length <= 2, so a product named "The Big Poster"
+    kept "the" as one of its own matchable name tokens. Since "the" occurs in nearly every
+    English sentence, "update the classic t-shirt quantity to 3" spuriously OR-matched that
+    unrelated poster too (it never even mentions "poster"), going ambiguous against an item
+    the shopper never referenced at all. Calls CartIntentHandler directly against a
+    hand-built Cart to isolate the resolution logic under test."""
+    from src.adapters.base import Cart, CartLine, Product, Variant
+
+    poster = Product(
+        id="prod-poster-the",
+        name="The Big Poster",
+        category_id="cat-jackets",
+        base_price=29.00,
+        variants=[Variant(id="var-poster-the", attributes={}, price=29.00, in_stock=True, stock_quantity=10)],
+    )
+    adapter._products[poster.id] = poster
+    cart = Cart(
+        id="c1",
+        lines=[
+            CartLine(product_id="prod-tshirt-1", variant_id="var-tshirt-1-red-m", quantity=1, unit_price=19.99),
+            CartLine(product_id=poster.id, variant_id="var-poster-the", quantity=1, unit_price=29.00),
+        ],
+    )
+    handler = CartIntentHandler(adapter)
+
+    resolution = handler.resolve_cart_line_reference(cart, "update the classic t-shirt quantity to 3")
+
+    assert resolution.kind == CartResolutionKind.RESOLVED
+    assert resolution.line is not None
+    assert resolution.line.product_id == "prod-tshirt-1"
+
+
 def test_add_to_cart_falls_back_to_the_page_the_shopper_is_literally_on(
     adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
 ) -> None:

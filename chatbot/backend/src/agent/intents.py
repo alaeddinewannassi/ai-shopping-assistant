@@ -645,7 +645,16 @@ class CartIntentHandler:
     def resolve_cart_line_reference(self, cart: Cart, raw_text: str) -> CartResolution:
         """US2 Scenario 4 (update quantity / remove an existing line): finds the single cart
         line the shopper is referring to by product name, without ever guessing among
-        several matches."""
+        several matches.
+
+        Real, confirmed live bug: the token filter only excluded words of length <= 2, so a
+        product name starting with the article "The" (e.g. "The adventure begins Framed
+        poster") kept "the" as one of its own matchable name tokens — and since "the" occurs
+        in nearly every English sentence, ANY cart-modification message ("update THE sweater
+        quantity to -5") spuriously OR-matched that product too, going ambiguous against an
+        item the shopper never mentioned at all. Every other keyword-matching path in this
+        module (_clean_term, _clean_reference_term) already filters common stopwords for
+        exactly this reason — this one never did."""
         text_lower = raw_text.lower()
         matches: list[tuple[CartLine, Product]] = []
         for line in cart.lines:
@@ -656,7 +665,9 @@ class CartIntentHandler:
                 return CartResolution(kind=CartResolutionKind.UNAVAILABLE)
             except ProductNotFoundError:
                 continue
-            name_tokens = [t for t in product.name.lower().split() if len(t) > 2]
+            name_tokens = [
+                t for t in product.name.lower().split() if len(t) > 2 and t not in _STOPWORDS
+            ]
             if any(_value_mentioned(t, text_lower) for t in name_tokens):
                 matches.append((line, product))
 
