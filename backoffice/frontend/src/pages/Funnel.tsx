@@ -12,7 +12,13 @@ const STAGE_LABELS: Record<string, string> = {
   confirmed: "Confirmed",
   cart_mutated: "Cart mutated",
   checkout_proposed: "Checkout proposed",
-  ordered: "Ordered",
+  // Not "Ordered" — a real, confirmed live gap: for every client-cart-synced tenant (every
+  // real PrestaShop store), checkout always hands off to PrestaShop's own native checkout
+  // page, so an "ordered" outcome can never actually fire — that bar would sit at 0 forever
+  // regardless of how many shoppers really buy. checkout_handed_off tracks the thing this
+  // pipeline can honestly observe instead: real purchase intent (see FunnelMetrics in
+  // lib/api.ts).
+  checkout_handed_off: "Checkout handed off",
 };
 
 export function Funnel() {

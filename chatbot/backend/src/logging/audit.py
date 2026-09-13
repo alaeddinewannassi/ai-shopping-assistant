@@ -95,20 +95,35 @@ def log_action(
     _enqueue_event(session_id, intent, action, outcome, details or {})
 
 
-def log_turn_completed(session_id: str) -> None:
+def log_turn_completed(
+    session_id: str, *, message: str | None = None, reply: str | None = None
+) -> None:
     """Emits one extra event marking the end of the current turn, carrying its total
     latency — called once by handle_turn() right before it returns. A no-op (well, still a
     normal log_action-shaped stdout line) outside an active TurnContext, but elapsed_ms is
-    only meaningful when one is."""
+    only meaningful when one is.
+
+    `message`/`reply` (the shopper's actual words and the assistant's actual reply) are new:
+    real, confirmed gap found reviewing the backoffice's session detail page live — every
+    event showed classified intent/action/outcome and structured metadata (elapsed_ms,
+    action_id, ...), but never what was actually SAID, which is the single most useful thing
+    for an admin debugging "why did this conversation go wrong." Stored in this event's own
+    `details` (already a free-form JSON column, no schema change) rather than a new table —
+    this is the one event already guaranteed to fire exactly once per turn. No redaction: this
+    project has no retention/PII policy yet (a pre-existing, documented backoffice gap, see
+    backoffice/README.md's "Known gaps") — a shopper's own chat messages living in the audit
+    log they already appear in (session_id, real_customer_email elsewhere) isn't a new
+    category of exposure, just worth knowing about before this goes anywhere beyond a demo."""
     turn = turn_context.current()
     elapsed_ms = turn.elapsed_ms if turn is not None else None
-    log_action(
-        session_id,
-        "turn_completed",
-        "turn_completed",
-        "ok",
-        details={"elapsed_ms": elapsed_ms} if elapsed_ms is not None else {},
-    )
+    details: dict[str, Any] = {}
+    if elapsed_ms is not None:
+        details["elapsed_ms"] = elapsed_ms
+    if message is not None:
+        details["message"] = message
+    if reply is not None:
+        details["reply"] = reply
+    log_action(session_id, "turn_completed", "turn_completed", "ok", details=details)
 
 
 def _persist(session_id: str, record: dict) -> None:

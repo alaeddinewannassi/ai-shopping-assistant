@@ -72,6 +72,48 @@ def test_insert_many_batches_rows_for_one_turn(session, tenant_id) -> None:
     assert events[1].turn_elapsed_ms == 42
 
 
+def test_list_for_session_orders_by_when_things_actually_happened_not_turn_id(session, tenant_id) -> None:
+    """Regression test for a real, confirmed live bug: an admin reading a session's event
+    log saw timestamps jump around (2:47:21 -> 2:47:19 -> 2:47:36 -> 2:47:34) instead of
+    reading top-to-bottom in order. Root cause: this used to order by (turn_id, seq), and
+    turn_id is a plain random UUID4 (agent/turn_context.py's TurnContext) — unrelated to
+    when a turn actually happened. Three turns inserted in a deliberately scrambled order
+    (by turn_id) must still come back sorted by their real occurred_at."""
+    from datetime import timedelta
+
+    turn_a, turn_b, turn_c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    base = datetime(2026, 9, 13, 14, 47, 0, tzinfo=UTC)
+    rows = [
+        # Inserted out of chronological order — turn_b (middle in time) first, to prove
+        # the ordering comes from occurred_at, not insertion order or turn_id sort order.
+        {
+            "event_id": uuid.uuid4(), "tenant_id": tenant_id, "session_id": "s1",
+            "turn_id": turn_b, "seq": 0, "occurred_at": base + timedelta(seconds=34),
+            "intent": "propose_add_to_cart", "action": "propose", "outcome": "pending",
+            "details": {}, "turn_elapsed_ms": None,
+        },
+        {
+            "event_id": uuid.uuid4(), "tenant_id": tenant_id, "session_id": "s1",
+            "turn_id": turn_a, "seq": 0, "occurred_at": base + timedelta(seconds=19),
+            "intent": "search_products", "action": "search_products", "outcome": "products",
+            "details": {}, "turn_elapsed_ms": None,
+        },
+        {
+            "event_id": uuid.uuid4(), "tenant_id": tenant_id, "session_id": "s1",
+            "turn_id": turn_c, "seq": 0, "occurred_at": base + timedelta(seconds=36),
+            "intent": "confirm_pending_action", "action": "confirm", "outcome": "success",
+            "details": {}, "turn_elapsed_ms": None,
+        },
+    ]
+    AssistantEventRepository(session).insert_many(rows)
+    session.commit()
+
+    events = AssistantEventRepository(session).list_for_session(tenant_id, "s1")
+
+    assert [e.turn_id for e in events] == [turn_a, turn_b, turn_c]
+    assert [e.occurred_at for e in events] == sorted(e.occurred_at for e in events)
+
+
 def test_conversation_session_outcome_never_downgrades(session, tenant_id) -> None:
     repo = ConversationSessionRepository(session)
     repo.upsert_turn(tenant_id, "s1", outcome="cart", cart_id="cart-1")
@@ -87,6 +129,31 @@ def test_conversation_session_outcome_never_downgrades(session, tenant_id) -> No
     assert record.turn_count == 3
     assert record.cart_id == "cart-1"
     assert record.order_id == "order-1"
+
+
+def test_checkout_outcome_sits_between_cart_and_ordered(session, tenant_id) -> None:
+    """"checkout" (a session handed off to native checkout — see chatbot/backend's
+    _upsert_conversation_session) is real purchase INTENT, a step further than a cart
+    mutation but not a confirmed order — must rank strictly between "cart" and "ordered" so
+    it upgrades a merely-browsing/cart session but never downgrades an already-"ordered"
+    one, and is itself never downgraded by a later plain cart mutation."""
+    repo = ConversationSessionRepository(session)
+    repo.upsert_turn(tenant_id, "s2", outcome="cart")
+    session.commit()
+
+    record = repo.upsert_turn(tenant_id, "s2", outcome="checkout")
+    session.commit()
+    assert record.outcome == "checkout"
+
+    # A later cart mutation in the same session (e.g. the shopper went back and changed
+    # quantity) must not downgrade a session that already reached checkout.
+    record = repo.upsert_turn(tenant_id, "s2", outcome="cart")
+    session.commit()
+    assert record.outcome == "checkout"
+
+    record = repo.upsert_turn(tenant_id, "s2", outcome="ordered")
+    session.commit()
+    assert record.outcome == "ordered"
 
 
 def test_events_and_sessions_are_scoped_per_tenant(session) -> None:

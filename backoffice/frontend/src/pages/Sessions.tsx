@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 import { api } from "../lib/api";
 import { useSelectedTenant } from "../lib/auth";
 
-const OUTCOMES = ["", "browsing", "cart", "ordered", "abandoned"];
+const OUTCOMES = ["", "browsing", "cart", "checkout", "ordered", "abandoned"];
 
 export function Sessions() {
   const [tenantId] = useSelectedTenant();

@@ -10,8 +10,16 @@ from tenancy_db.base import Base
 from tenancy_db.engine import reset_engine
 from tenancy_db.repositories import AssistantEventRepository
 
-from src.agent.dialogue import handle_turn
+from src.adapters.base import Cart, CartLine
+from src.adapters.mock import MockAdapter
+from src.agent.dialogue import DialogueContext, handle_turn
+from src.agent.intents import CartIntentHandler, DiscoveryIntentHandler
+from src.agent.llm_client import ActionCall
+from src.agent.pending import PendingActionGate
+from src.agent.taxonomy_resolver import TaxonomyResolver
 from src.logging.audit import dropped_event_count, wait_for_drain
+from src.session.catalog_cache import CatalogSnapshotCache
+from src.session.store import SessionStore
 from src.tenancy.config import legacy_env_tenant_config
 from src.tenancy.runtime import build_tenant_runtime, clear_all
 
@@ -68,6 +76,56 @@ def test_full_turn_emits_events_with_non_null_turn_latency(monkeypatch, tmp_path
     assert [e.seq for e in first_turn_events] == list(range(len(first_turn_events)))
 
 
+def test_turn_completed_event_carries_the_actual_message_and_reply_text(monkeypatch, tmp_path) -> None:
+    """Regression test for a real gap found reviewing the backoffice's session detail page
+    live: every event showed classified intent/action/outcome and structured metadata
+    (elapsed_ms, action_id, ...), but never what was actually SAID — the single most useful
+    thing for an admin debugging why a conversation went wrong. The turn_completed event
+    (guaranteed to fire exactly once per handle_turn() call) now carries both."""
+    runtime, config = _configured_runtime(monkeypatch, tmp_path)
+
+    reply = handle_turn(runtime.dialogue_ctx, "pipeline-session-3", "show me t-shirts")
+    wait_for_drain()
+
+    from tenancy_db.engine import session_scope
+
+    with session_scope() as db:
+        events = AssistantEventRepository(db).list_for_session(config.tenant_id, "pipeline-session-3")
+
+    turn_completed = next(e for e in events if e.intent == "turn_completed")
+    assert turn_completed.details["message"] == "show me t-shirts"
+    assert turn_completed.details["reply"] == reply
+
+
+def test_propose_and_confirm_events_carry_which_product_not_just_an_action_id(monkeypatch, tmp_path) -> None:
+    """Regression test for a real gap found reviewing the session detail page live: a
+    propose_add_to_cart event's details only ever had {"action_id": "..."} — an admin could
+    see THAT something was proposed, never WHAT (which product/variant/quantity). The
+    confirm_pending_action success event had the same gap one step further: only
+    {"action_type": "add_cart_item"}, not which one. Both now carry the actual
+    product_id/variant_id/quantity."""
+    runtime, config = _configured_runtime(monkeypatch, tmp_path)
+
+    handle_turn(runtime.dialogue_ctx, "pipeline-session-4", "add the red classic t-shirt to my cart")
+    handle_turn(runtime.dialogue_ctx, "pipeline-session-4", "yes")
+    wait_for_drain()
+
+    from tenancy_db.engine import session_scope
+
+    with session_scope() as db:
+        events = AssistantEventRepository(db).list_for_session(config.tenant_id, "pipeline-session-4")
+
+    propose = next(e for e in events if e.intent == "propose_add_to_cart")
+    assert propose.details["product_id"] == "prod-tshirt-1"
+    assert "variant_id" in propose.details
+    assert propose.details["quantity"] == 1
+
+    confirm = next(e for e in events if e.intent == "confirm_pending_action")
+    assert confirm.details["action_type"] == "add_cart_item"
+    assert confirm.details["product_id"] == "prod-tshirt-1"
+    assert "variant_id" in confirm.details
+
+
 def test_confirmed_cart_mutation_is_classified_as_cart_outcome_not_browsing(monkeypatch, tmp_path) -> None:
     """Regression test for a real, confirmed live bug (found via a backoffice admin
     comparing pages): the Funnel page correctly counted sessions reaching "cart_mutated"
@@ -94,6 +152,103 @@ def test_confirmed_cart_mutation_is_classified_as_cart_outcome_not_browsing(monk
             )
         ).one()
         assert record.outcome == "cart"
+
+
+class _ClientSyncAdapter(MockAdapter):
+    """MockAdapter + client-cart-sync support — matches every real PrestaShop tenant this
+    project targets (src/adapters/prestashop.py's supports_client_cart_sync = True), where
+    checkout always hands off to PrestaShop's own native checkout page instead of completing
+    through this backend."""
+
+    supports_client_cart_sync = True
+
+    def cart_from_snapshot(self, snapshot: list[dict]) -> Cart:
+        lines = [
+            CartLine(
+                product_id=row["variant_id"].split("#")[0],
+                variant_id=row["variant_id"],
+                quantity=row["quantity"],
+                unit_price=1.0,
+            )
+            for row in snapshot
+        ]
+        return Cart(id="client-cart", lines=lines)
+
+
+class _ScriptedLLMClient:
+    """Confirms whenever a pending action awaits it, otherwise returns `action` — the same
+    stand-in test_client_cart_sync.py uses for a bare "yes" following a proposal."""
+
+    def __init__(self, action: ActionCall) -> None:
+        self._action = action
+
+    def parse_turn(self, message: str, context: dict, *, session_id: str | None = None) -> ActionCall:
+        if context.get("pending_action") is not None:
+            return ActionCall(action_type="confirm_pending_action", parameters={})
+        return self._action
+
+    def phrase_reply(self, facts: str, shopper_message: str, *, session_id: str | None = None) -> str:
+        return facts
+
+
+def test_checkout_handoff_for_a_synced_tenant_is_classified_as_checkout_not_stuck_at_browsing(
+    monkeypatch, tmp_path
+) -> None:
+    """Regression test for a real, confirmed live gap: Overview's conversion_rate is
+    structurally stuck at 0% for every real (client-cart-synced) PrestaShop tenant, because
+    checkout there always hands off to PrestaShop's own native checkout page instead of
+    completing through this backend — has_completed_order can never become True, so
+    "ordered" never fires. That loop can't be closed without a separate integration (the
+    widget detecting PrestaShop's order-confirmation page), but real purchase INTENT — the
+    moment a session was handed off to buy — was already free to observe via
+    session.last_turn_handoff_to_native_checkout, the exact same way the "cart" outcome fix
+    used session.last_turn_auto_navigate_to_cart. Without this, every one of these sessions
+    looked identical to a shopper who never even tried to buy anything."""
+    db_path = tmp_path / "analytics_pipeline_checkout.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+
+    from tenancy_db.engine import get_engine
+
+    engine = get_engine()
+    Base.metadata.create_all(engine)
+
+    config = legacy_env_tenant_config("default")
+    adapter = _ClientSyncAdapter()
+    session_store = SessionStore(redis_url=None)
+    resolver = TaxonomyResolver(adapter)
+    ctx = DialogueContext(
+        session_store=session_store,
+        llm_client=_ScriptedLLMClient(ActionCall(action_type="request_checkout", parameters={})),
+        discovery_handler=DiscoveryIntentHandler(adapter, resolver, CatalogSnapshotCache()),
+        adapter=adapter,
+        cart_handler=CartIntentHandler(adapter),
+        pending_gate=PendingActionGate(session_store, adapter),
+        tenant_id=config.tenant_id,
+    )
+
+    handle_turn(
+        ctx, "checkout-session-1", "checkout",
+        cart_snapshot=[{"variant_id": "prod-tshirt-1#var-tshirt-1-red-m", "quantity": 1}],
+    )
+    session = session_store.get_or_create("checkout-session-1")
+    handle_turn(ctx, "checkout-session-1", "yes", cart_snapshot=session.client_cart_snapshot)
+
+    session = session_store.get_or_create("checkout-session-1")
+    assert session.last_turn_handoff_to_native_checkout is True
+    assert session.has_completed_order is False  # never actually completes here — by design
+
+    from tenancy_db.engine import session_scope
+    from tenancy_db.models.analytics import ConversationSessionRecord
+    import sqlalchemy as sa
+
+    with session_scope() as db:
+        record = db.scalars(
+            sa.select(ConversationSessionRecord).where(
+                ConversationSessionRecord.tenant_id == config.tenant_id,
+                ConversationSessionRecord.session_id == "checkout-session-1",
+            )
+        ).one()
+        assert record.outcome == "checkout"
 
 
 def test_chat_still_succeeds_when_database_is_unconfigured(monkeypatch) -> None:

@@ -336,7 +336,7 @@ paths:
           schema: { type: integer, default: 50, maximum: 200 }
         - name: outcome
           in: query
-          schema: { type: string, enum: [browsing, cart, ordered, abandoned] }
+          schema: { type: string, enum: [browsing, cart, checkout, ordered, abandoned] }
       responses:
         "200":
           content:
@@ -506,7 +506,11 @@ components:
         confirmed: { type: integer }
         cart_mutated: { type: integer }
         checkout_proposed: { type: integer }
-        ordered: { type: integer }
+        # Not "ordered" — real order completion happens entirely inside PrestaShop's own
+        # native checkout for every client-cart-synced tenant, a separate system this
+        # pipeline can't observe; that field would always read 0. Tracks the thing it CAN
+        # honestly observe: a session actually handed off to complete a purchase.
+        checkout_handed_off: { type: integer }
 
     DailyPoint:
       type: object
@@ -522,7 +526,7 @@ components:
         started_at: { type: string, format: date-time }
         last_seen_at: { type: string, format: date-time }
         turn_count: { type: integer }
-        outcome: { type: string, enum: [browsing, cart, ordered, abandoned] }
+        outcome: { type: string, enum: [browsing, cart, checkout, ordered, abandoned] }
         cart_id: { type: string, nullable: true }
         order_id: { type: string, nullable: true }
 

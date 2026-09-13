@@ -375,7 +375,7 @@ def _handle_pending_add_quantity_override(ctx: DialogueContext, session_id: str,
     )
     log_action(
         session_id, "propose_add_to_cart", "propose", "pending",
-        details={"action_id": action.action_id, "quantity_override": quantity},
+        details={"action_id": action.action_id, "quantity_override": quantity, **action.parameters},
     )
     return f"{recap} (reply 'yes' to confirm or 'no' to cancel)"
 
@@ -557,7 +557,10 @@ def _handle_propose_add_to_cart(
         },
         recap,
     )
-    log_action(session_id, "propose_add_to_cart", "propose", "pending", details={"action_id": action.action_id})
+    log_action(
+        session_id, "propose_add_to_cart", "propose", "pending",
+        details={"action_id": action.action_id, **action.parameters},
+    )
     return f"{recap} (reply 'yes' to confirm or 'no' to cancel)"
 
 
@@ -626,7 +629,7 @@ def _handle_propose_cart_line_change(
         action_type,
         "propose",
         "pending",
-        details={"action_id": action.action_id},
+        details={"action_id": action.action_id, "product_id": product.id, **action.parameters},
     )
     return f"{recap} (reply 'yes' to confirm or 'no' to cancel)"
 
@@ -651,7 +654,10 @@ def _handle_request_checkout(ctx: DialogueContext, session_id: str) -> str:
 
     recap = build_checkout_recap(cart, _products_by_id_for_cart(ctx, cart))
     action = ctx.pending_gate.propose(session_id, "checkout", {}, recap)
-    log_action(session_id, "request_checkout", "propose", "pending", details={"action_id": action.action_id})
+    log_action(
+        session_id, "request_checkout", "propose", "pending",
+        details={"action_id": action.action_id, "line_count": len(cart.lines), "subtotal": cart.subtotal},
+    )
     return f"{recap} Shall I place the order? (reply 'yes' to confirm or 'no' to cancel)"
 
 
@@ -697,7 +703,7 @@ def _handle_checkout_state_changed(ctx: DialogueContext, session_id: str) -> str
     action = ctx.pending_gate.propose(session_id, "checkout", {}, recap)
     log_action(
         session_id, "confirm_pending_action", "checkout", "cart_state_changed",
-        details={"action_id": action.action_id},
+        details={"action_id": action.action_id, "line_count": len(cart.lines), "subtotal": cart.subtotal},
     )
     return (
         "Something changed in your cart since I last showed you this (stock, price, or "
@@ -913,9 +919,16 @@ def _handle_confirm(ctx: DialogueContext, session_id: str) -> ConfirmOutcome:
     # details.action_type distinguishes a confirmed cart mutation from a confirmed checkout —
     # both share this same (intent, action, outcome) tuple otherwise, and the funnel query
     # (backoffice/backend/src/analytics/queries.py) needs that distinction (T404).
+    #
+    # **pending.parameters merged in below: a real gap found reviewing the session detail
+    # page live — this event (the actual confirmed MUTATION) only ever showed action_type,
+    # never which product/variant/quantity/promo code it actually was, even though every
+    # propose-side event for the exact same action already carries that (see
+    # _handle_propose_add_to_cart et al.). An admin could see THAT something was confirmed,
+    # never WHAT.
     log_action(
         session_id, "confirm_pending_action", "confirm", "success",
-        details={"action_type": pending.action_type},
+        details={"action_type": pending.action_type, **pending.parameters},
     )
 
     if pending.action_type == "checkout":
@@ -972,10 +985,16 @@ def _handle_decline(ctx: DialogueContext, session_id: str) -> str:
         log_action(session_id, "decline_pending_action", "decline", "nothing_pending")
     else:
         # Record *what* was declined (not just that a decline happened) so the audit trail
-        # can reconstruct which proposed action never went through (FR-014).
+        # can reconstruct which proposed action never went through (FR-014). Parameters
+        # merged in the same way the confirm-success event now does, for the same reason:
+        # "declined" alone doesn't say which product/variant/quantity/code was turned down.
         log_action(
             session_id, "decline_pending_action", "decline", "declined",
-            details={"action_id": pending.action_id, "declined_action_type": pending.action_type},
+            details={
+                "action_id": pending.action_id,
+                "declined_action_type": pending.action_type,
+                **pending.parameters,
+            },
         )
     return "No problem, I won't make that change. What would you like to do instead?"
 
@@ -1042,10 +1061,26 @@ def _upsert_conversation_session(ctx: DialogueContext, session_id: str) -> None:
     turn must never pay analytics-classification latency, plan.md D4). That reasoning didn't
     hold up: session.last_turn_auto_navigate_to_cart is ALREADY set, at zero extra cost,
     exactly when this turn just confirmed a real cart mutation (add/update/remove) — no
-    round-trip needed, the data was already in memory. ConversationSessionRepository.
-    upsert_turn's ranking (browsing < cart < ordered) already handles this safely — outcome
-    only ever moves forward, so a later "browsing" turn (outcome=None here) never downgrades
-    an already-cart/ordered session."""
+    round-trip needed, the data was already in memory.
+
+    Second gap found the same way, live: "ordered" itself never fires at all for any
+    client-cart-synced tenant (i.e. every real PrestaShop store this project targets) —
+    checkout there always hands off to PrestaShop's OWN native checkout page instead of
+    completing the order through this backend (PendingActionGate.confirm()'s
+    handoff_to_native_checkout branch), so has_completed_order can never become True and
+    Overview's conversion_rate is structurally stuck at 0% no matter how many shoppers
+    actually buy. Real order completion happens entirely inside PrestaShop, a separate
+    system this pipeline doesn't observe — closing that loop needs its own integration
+    (e.g. the widget detecting PrestaShop's order-confirmation page), not a quick fix here.
+    What IS free, the same way session.last_turn_auto_navigate_to_cart already was:
+    session.last_turn_handoff_to_native_checkout, set the instant a checkout hands off. A
+    "checkout" outcome — real purchase INTENT, not a confirmed purchase — is far more honest
+    than leaving every one of these sessions looking identical to a shopper who never even
+    tried to buy anything.
+
+    ConversationSessionRepository.upsert_turn's ranking (browsing < cart < checkout <
+    ordered) handles all of this safely — outcome only ever moves forward, so a later
+    "browsing" turn (outcome=None here) never downgrades an already-further-along session."""
     if ctx.tenant_id is None:
         return
     from tenancy_db.engine import session_scope
@@ -1054,6 +1089,8 @@ def _upsert_conversation_session(ctx: DialogueContext, session_id: str) -> None:
     session = ctx.session_store.get_or_create(session_id)
     if session.has_completed_order:
         outcome = "ordered"
+    elif session.last_turn_handoff_to_native_checkout:
+        outcome = "checkout"
     elif session.last_turn_auto_navigate_to_cart:
         outcome = "cart"
     else:
@@ -1118,7 +1155,7 @@ def handle_turn(
         ctx.adapter.set_customer_context(session_id, customer_email)
 
         reply = _route_turn(ctx, session_id, message, current_product_id=current_product_id)
-        log_turn_completed(session_id)
+        log_turn_completed(session_id, message=message, reply=reply)
         _upsert_conversation_session(ctx, session_id)
         return reply
 

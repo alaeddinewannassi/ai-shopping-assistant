@@ -49,7 +49,16 @@ class FunnelMetrics:
     confirmed: int
     cart_mutated: int
     checkout_proposed: int
-    ordered: int
+    # NOT "ordered" — a real, confirmed live gap found reviewing the dashboard: for every
+    # client-cart-synced tenant (every real PrestaShop store this project targets), checkout
+    # always hands off to PrestaShop's OWN native checkout page instead of completing the
+    # order through this backend, so an "ordered" session outcome can never actually fire —
+    # that bar would sit at 0 forever regardless of how many shoppers really buy, which is
+    # actively misleading in a funnel (looks like nobody ever converts). checkout_handed_off
+    # tracks the thing this pipeline CAN honestly observe: real purchase intent, the moment a
+    # session was handed off to complete a purchase — see dialogue.py's
+    # _upsert_conversation_session for the "checkout" outcome this counts.
+    checkout_handed_off: int
 
 
 @dataclass
@@ -84,8 +93,9 @@ def get_overview(db: Session, tenant_id: uuid.UUID, start: datetime, end: dateti
 
 def get_funnel(db: Session, tenant_id: uuid.UUID, start: datetime, end: datetime) -> FunnelMetrics:
     """Funnel panel: sessions -> discovery -> proposal -> confirmed -> cart_mutated ->
-    checkout_proposed -> ordered, each a DISTINCT session count (a session can land in
-    multiple stages — that's the point of a funnel, not a bug)."""
+    checkout_proposed -> checkout_handed_off, each a DISTINCT session count (a session can
+    land in multiple stages — that's the point of a funnel, not a bug). No "ordered" stage —
+    see FunnelMetrics.checkout_handed_off's docstring for why that would be misleading here."""
     events = _events_in_range(db, tenant_id, start, end)
     by_session: dict[str, list[AssistantEvent]] = {}
     for e in events:
@@ -110,7 +120,7 @@ def get_funnel(db: Session, tenant_id: uuid.UUID, start: datetime, end: datetime
                 if (e.details or {}).get("action_type") in _MUTATION_ACTION_TYPES:
                     cart_mutated.add(session_id)
 
-    ordered = _count_sessions_with_outcome(db, tenant_id, set(by_session), "ordered")
+    checkout_handed_off = _count_sessions_with_outcome(db, tenant_id, set(by_session), "checkout")
 
     return FunnelMetrics(
         sessions=len(by_session),
@@ -119,7 +129,7 @@ def get_funnel(db: Session, tenant_id: uuid.UUID, start: datetime, end: datetime
         confirmed=len(confirmed),
         cart_mutated=len(cart_mutated),
         checkout_proposed=len(checkout_proposed),
-        ordered=ordered,
+        checkout_handed_off=checkout_handed_off,
     )
 
 

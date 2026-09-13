@@ -30,10 +30,17 @@ class AssistantEventRepository:
         self._session.flush()
 
     def list_for_session(self, tenant_id: uuid.UUID, session_id: str) -> list[AssistantEvent]:
+        """Real, confirmed live bug (found by an admin reading a session's event log and
+        seeing timestamps jump around: 2:47:21 -> 2:47:19 -> 2:47:36 -> 2:47:34): this used
+        to order by (turn_id, seq). turn_id is a plain random UUID4 (agent/turn_context.py's
+        TurnContext), not a time-ordered id — so while events WITHIN a turn were correctly
+        ordered by seq, the turns themselves came back in random UUID order, not the order
+        they actually happened in. Orders by (occurred_at, seq) instead — seq remains the
+        tiebreaker for events sharing a turn's single occurred_at-adjacent timestamp."""
         stmt = (
             sa.select(AssistantEvent)
             .where(AssistantEvent.tenant_id == tenant_id, AssistantEvent.session_id == session_id)
-            .order_by(AssistantEvent.turn_id, AssistantEvent.seq)
+            .order_by(AssistantEvent.occurred_at, AssistantEvent.seq)
         )
         return list(self._session.scalars(stmt).all())
 
@@ -52,7 +59,7 @@ class ConversationSessionRepository:
         outcome: str | None = None,
     ) -> ConversationSessionRecord:
         """Bumps turn_count/last_seen_at for this (tenant, session), creating the row on
-        first turn. `outcome` only ever moves forward (browsing -> cart -> ordered) — a
+        first turn. `outcome` only ever moves forward (browsing -> cart -> checkout -> ordered) — a
         later turn must never downgrade an already-classified session."""
         stmt = sa.select(ConversationSessionRecord).where(
             ConversationSessionRecord.tenant_id == tenant_id,
@@ -84,4 +91,4 @@ class ConversationSessionRepository:
         return record
 
 
-_OUTCOME_RANK = {"browsing": 0, "cart": 1, "ordered": 2, "abandoned": 1}
+_OUTCOME_RANK = {"browsing": 0, "cart": 1, "abandoned": 1, "checkout": 2, "ordered": 3}

@@ -114,7 +114,11 @@ export interface FunnelMetrics {
   confirmed: number;
   cart_mutated: number;
   checkout_proposed: number;
-  ordered: number;
+  // Not "ordered" — real order completion happens entirely inside PrestaShop's own native
+  // checkout for every client-cart-synced tenant, a separate system this pipeline can't
+  // observe; that bar would always read 0. This tracks the thing it CAN honestly observe:
+  // a session actually handed off to complete a purchase (real intent, not confirmed spend).
+  checkout_handed_off: number;
 }
 
 export interface DailyPoint {
@@ -128,7 +132,7 @@ export interface SessionSummary {
   started_at: string;
   last_seen_at: string;
   turn_count: number;
-  outcome: "browsing" | "cart" | "ordered" | "abandoned";
+  outcome: "browsing" | "cart" | "checkout" | "ordered" | "abandoned";
   cart_id: string | null;
   order_id: string | null;
 }

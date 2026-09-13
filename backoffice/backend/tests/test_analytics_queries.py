@@ -106,8 +106,13 @@ def test_overview_and_funnel_numbers_match_hand_computed_expectations(db) -> Non
             ConversationSessionRecord(
                 tenant_id=tenant_id, session_id="s2", last_seen_at=_NOW, turn_count=1, outcome="browsing"
             ),
+            # Never actually confirmed anything (its own events show a proposal that never
+            # got a "confirm" event) — outcome is independent, hand-set here the same way a
+            # real handoff-to-native-checkout turn would set it (dialogue.py's
+            # _upsert_conversation_session), to exercise checkout_handed_off distinctly from
+            # "ordered".
             ConversationSessionRecord(
-                tenant_id=tenant_id, session_id="s3", last_seen_at=_NOW, turn_count=2, outcome="browsing"
+                tenant_id=tenant_id, session_id="s3", last_seen_at=_NOW, turn_count=2, outcome="checkout"
             ),
         ]
     )
@@ -123,7 +128,7 @@ def test_overview_and_funnel_numbers_match_hand_computed_expectations(db) -> Non
     assert funnel.confirmed == 1  # only s1 confirmed anything
     assert funnel.cart_mutated == 1  # s1's add_cart_item confirm
     assert funnel.checkout_proposed == 1  # only s1 proposed checkout
-    assert funnel.ordered == 1  # only s1
+    assert funnel.checkout_handed_off == 1  # only s3, distinct from s1's "ordered"
 
     overview = get_overview(db, tenant_id, start, end)
     assert overview.session_count == 3
@@ -205,7 +210,7 @@ def test_empty_range_returns_zeroed_metrics_not_a_crash(db) -> None:
 
     funnel = get_funnel(db, tenant_id, start, end)
     assert funnel.sessions == 0
-    assert funnel.ordered == 0
+    assert funnel.checkout_handed_off == 0
 
     overview = get_overview(db, tenant_id, start, end)
     assert overview.session_count == 0
