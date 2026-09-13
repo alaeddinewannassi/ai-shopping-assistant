@@ -669,6 +669,17 @@ def _handle_apply_promo(ctx: DialogueContext, session_id: str, raw_text: str) ->
 
     assert resolution.kind == PromoResolutionKind.RESOLVED
     validation = resolution.validation
+
+    # Real, confirmed live bug: asking to apply a code that's already active on this exact
+    # cart (validate_promo_for_cart only checks rule eligibility against products/subtotal,
+    # not "is this cart rule already on the cart") came back RESOLVED again, so the shopper
+    # got a confusing "You qualify for code WELCOME10 ... apply it?" proposal for a code the
+    # bot itself had *just* confirmed still applies. State the honest fact instead of
+    # re-proposing something already true.
+    if cart.applied_promo_code and cart.applied_promo_code.upper() == resolution.code.upper():
+        log_action(session_id, "apply_promo", "validate_promo", "already_applied", details={"code": resolution.code})
+        return f"{resolution.code} is already applied to your cart."
+
     recap = _promo_suggestion_recap(ctx, cart, resolution.code, validation.discount_amount)
     action = ctx.pending_gate.propose(session_id, "apply_promo", {"code": resolution.code}, recap)
     log_action(

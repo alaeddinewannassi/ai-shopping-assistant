@@ -205,6 +205,29 @@ def test_confirmed_promo_reply_states_the_discount_and_new_total(
     assert f"{cart.grand_total:.2f}" in reply
 
 
+def test_reapplying_an_already_applied_promo_code_states_that_instead_of_reproposing(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore,
+    promo_rules: list[PromoStrategyRule],
+) -> None:
+    """Regression test for a real, confirmed live bug: asking to apply a promo code that is
+    already active on this exact cart came back RESOLVED again from validate_promo_for_cart
+    (it only checks rule eligibility against products/subtotal, not "is this cart rule
+    already on the cart") — the shopper got a confusing "You qualify for code WELCOME10,
+    which would save you $X, apply it to your cart?" proposal for a code the bot itself had
+    just confirmed was already active. Must state the honest fact instead of re-proposing."""
+    ctx = _ctx(adapter, llm_client, session_store, promo_rules)
+    _add_and_confirm(ctx, "p12", "add the red classic t-shirt to my cart")
+    handle_turn(ctx, "p12", "apply promo code WELCOME10")
+    handle_turn(ctx, "p12", "yes")
+
+    reply = handle_turn(ctx, "p12", "apply promo code WELCOME10")
+
+    assert "already applied" in reply.lower()
+    assert "apply it to your cart" not in reply.lower()
+    session = session_store.get_or_create("p12")
+    assert session.pending_action is None
+
+
 def test_shopper_provided_invalid_code_reports_reason_clearly(
     adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore,
     promo_rules: list[PromoStrategyRule],
