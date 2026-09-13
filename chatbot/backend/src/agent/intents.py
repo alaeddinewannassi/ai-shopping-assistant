@@ -25,7 +25,7 @@ from src.adapters.base import (
     PromoValidation,
     Variant,
 )
-from src.adapters.matching import token_matches_product
+from src.adapters.matching import token_matches_name, token_matches_product
 from src.agent.taxonomy_resolver import Candidate, ResolutionStatus, TaxonomyResolver
 from src.session.catalog_cache import CatalogSnapshotCache
 
@@ -464,6 +464,21 @@ def _resolve_single_product(
             ]
             if len(narrowed) == 1:
                 products = narrowed
+    if len(products) > 1:
+        # Real, confirmed live bug: "what material is the sweater made of?" stayed ambiguous
+        # after AND-narrowing (neither "material" nor "made" literally appears in any
+        # product's own name/description, so requiring EVERY token to match collapsed to
+        # nothing) — and the last-shown tiebreaker below then picked a STALE, unrelated
+        # product from several turns/pages earlier, even though "sweater" unambiguously
+        # names a specific item right in the question. A term matching a candidate's own
+        # NAME is a far stronger signal than the generic recency-based fallback below, which
+        # should only decide close calls the shopper's own words don't already settle.
+        name_matches = [
+            p for p in products
+            if any(token_matches_name(t, p.name) for t in term.split() if len(t) > 2)
+        ]
+        if len(name_matches) == 1:
+            products = name_matches
     if len(products) > 1 and last_shown_ids:
         # Keyword AND-narrowing alone still leaves several candidates when the raw text
         # mixes a product reference with unrelated trailing chatter ("the adventure begins

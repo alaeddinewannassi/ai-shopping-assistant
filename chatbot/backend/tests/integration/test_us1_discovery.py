@@ -400,6 +400,33 @@ def test_named_reference_with_trailing_chatter_resolves_against_the_last_shown_p
     assert "Blue Jacket" in reply
 
 
+def test_specific_name_mention_wins_over_a_stale_unrelated_last_shown_product(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    """Regression test for a real, confirmed live bug: asking "what material is the
+    [sweater] made of?" (several turns and page-navigations after a completely different
+    product was last shown) answered about the STALE last-shown product instead — AND-
+    narrowing couldn't collapse ("material"/"made" don't literally appear in any product's
+    catalog text, so requiring every token to match left nothing), and the last-shown
+    tiebreaker then won even though the question names a different, specific product by
+    name right in the text. The wrong product's real description was then quoted as fact —
+    a genuine misinformation risk, not just an annoyance. A term matching a candidate's own
+    NAME must be checked before falling back to stale recency."""
+    session = session_store.get_or_create("s12e")
+    session.last_shown_product_ids = ["prod-tshirt-1"]  # stale — from several turns ago
+    session_store.save(session)
+
+    scripted = _ScriptedLLMClient(
+        ActionCall(action_type="get_product_details", parameters={"raw_text": "what material is the jacket made of"})
+    )
+    ctx = _ctx(adapter, scripted, session_store)
+
+    reply = handle_turn(ctx, "s12e", "what material is the jacket made of")
+
+    assert "Blue Jacket" in reply
+    assert "Classic T-Shirt" not in reply
+
+
 def test_exact_verbatim_product_name_resolves_even_with_noisy_trailing_words(
     adapter: MockAdapter, session_store: SessionStore
 ) -> None:
