@@ -110,6 +110,40 @@ def test_confirmed_add_produces_a_widget_cart_action_and_never_touches_the_adapt
     assert "cart" in reply.lower()
 
 
+def test_confirmed_line_item_change_never_states_a_stale_discount_amount() -> None:
+    """Regression test for a real, confirmed live bug: confirming an update_cart_item for a
+    session with an active discount showed the raw new subtotal with NO mention of the
+    discount at all (result.cart from the client_synced _execute() branch never carries
+    session.client_cart_discount — that's only applied by dialogue.py's _get_cart, a
+    different code path). Fixed with an honest qualifier rather than either silently
+    dropping the discount or (worse) restating the OLD, now-wrong dollar amount against a
+    changed subtotal."""
+    adapter = _ClientSyncAdapter()
+    session_store = SessionStore(redis_url=None)
+    llm_client = _ScriptedLLMClient(
+        ActionCall(
+            action_type="propose_update_cart",
+            parameters={"raw_text": "update the classic t-shirt quantity to 3"},
+        )
+    )
+    ctx = _ctx(adapter, llm_client, session_store)
+
+    handle_turn(
+        ctx, "s7", "update the classic t-shirt quantity to 3",
+        cart_snapshot=[{"variant_id": "prod-tshirt-1#var-tshirt-1-red-m", "quantity": 1}],
+        cart_discount={"code": "WELCOME10", "amount": 2.0},
+    )
+    reply = handle_turn(
+        ctx, "s7", "yes",
+        cart_snapshot=[{"variant_id": "prod-tshirt-1#var-tshirt-1-red-m", "quantity": 1}],
+        cart_discount={"code": "WELCOME10", "amount": 2.0},
+    )
+
+    assert "WELCOME10" in reply
+    assert "$2.00" not in reply  # the OLD amount must never be restated as if still accurate
+    assert "check your cart" in reply.lower()
+
+
 def test_a_caller_that_never_sends_a_snapshot_keeps_todays_backend_owned_cart_behavior() -> None:
     """A non-browser API caller (curl, a script, a mobile app with no PrestaShop session)
     must be completely unaffected by client-cart-sync — this is opt-in per session, driven

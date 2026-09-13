@@ -842,6 +842,19 @@ def _handle_confirm(ctx: DialogueContext, session_id: str) -> ConfirmOutcome:
     if result.cart is None:
         return ConfirmOutcome("Done!", pending.action_type)
     reply = build_cart_summary(result.cart, _products_by_id_for_cart(ctx, result.cart))
+    if (
+        pending.action_type in {"add_cart_item", "update_cart_item", "remove_cart_item"}
+        and session.client_cart_discount
+    ):
+        # Real, confirmed live bug: a line-item change's predicted post-mutation cart (built
+        # from the pre-mutation snapshot, before the widget's real write even happens) has no
+        # way to know what a percentage-based discount recomputes to against the NEW subtotal
+        # — stating the OLD dollar amount here would be actively wrong, not just incomplete
+        # (e.g. a 10%-off code still showing "-$1.91" after the subtotal tripled). An honest
+        # qualifier instead of either a stale number or silently dropping that a code is still
+        # active at all — the real, authoritative total is one tap away via "View my cart".
+        code = session.client_cart_discount.get("code") or "your promo code"
+        reply += f" Your discount code ({code}) still applies — check your cart for the updated total."
     return ConfirmOutcome(reply, pending.action_type, client_cart_action=result.client_cart_action)
 
 
