@@ -84,7 +84,19 @@ def _format_clarifying_question(candidates: list[Candidate] | list[str]) -> str:
     return f"I found a few matching options — did you mean: {options}?"
 
 
-def render_discovery_reply(outcome: DiscoveryOutcome) -> str:
+# Real, confirmed live bug: "what material is this made of?" got answered with the FULL
+# size/color/stock enumeration anyway — accurate, but the shopper only asked about the
+# description, and the answer buried the one fact they wanted under a long, irrelevant
+# list. Deterministically scoped to what was actually asked (never a guess at content —
+# just whether to include the variant list at all): included only when the question itself
+# mentions sizes/colors/stock/variants/options.
+_VARIANT_QUESTION_PATTERN = re.compile(
+    r"\b(size|sizes|color|colors|colour|colours|stock|available|variant|variants|option|options)\b",
+    re.IGNORECASE,
+)
+
+
+def render_discovery_reply(outcome: DiscoveryOutcome, raw_text: str | None = None) -> str:
     if outcome.kind == DiscoveryKind.PRODUCTS:
         prefix = ""
         if outcome.degraded:
@@ -130,6 +142,12 @@ def render_discovery_reply(outcome: DiscoveryOutcome) -> str:
         description_suffix = f" {product.description}" if product.description else ""
         if not product.variants:
             return f"{product.name} is ${product.base_price:.2f} — it doesn't have size/color options.{description_suffix}"
+        # Defensive default (include everything) when raw_text isn't available — every real
+        # get_product_details call site passes it; only a defensive fallback for callers
+        # that don't (none currently do, but never silently drop real facts on a technicality).
+        wants_variants = raw_text is None or bool(_VARIANT_QUESTION_PATTERN.search(raw_text))
+        if not wants_variants:
+            return f"{product.name} (${product.base_price:.2f}).{description_suffix}"
         options = []
         for variant in product.variants:
             attrs = ", ".join(f"{k}: {v}" for k, v in variant.attributes.items())
@@ -1147,7 +1165,7 @@ def _route_turn(
         )
         _record_navigation(ctx.session_store, session, outcome)
         log_action(session_id, action.action_type, "get_product_details", outcome.kind.value)
-        reply = render_discovery_reply(outcome)
+        reply = render_discovery_reply(outcome, raw_text)
         discovery_outcome_kind = outcome.kind
         discovery_product_names = [p.name for p in outcome.products]
         if outcome.kind == DiscoveryKind.PRODUCT_DETAILS:

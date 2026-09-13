@@ -372,6 +372,48 @@ def test_get_product_details_reply_includes_the_real_catalog_description(
     assert "cotton" in reply.lower()
 
 
+def test_get_product_details_omits_the_variant_list_for_a_purely_descriptive_question(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    """Regression test for a real, confirmed live bug: "what material is this made of?"
+    got an accurate but overly long answer that buried the one fact the shopper actually
+    asked for under a full, irrelevant size/color/stock enumeration. The variant list is
+    only useful noise here — never fabricated, never wrong, just not what was asked."""
+    session = session_store.get_or_create("s12d")
+    session.last_shown_product_ids = ["prod-tshirt-1"]
+    session_store.save(session)
+
+    scripted = _ScriptedLLMClient(
+        ActionCall(action_type="get_product_details", parameters={"raw_text": "what material is this made of"})
+    )
+    ctx = _ctx(adapter, scripted, session_store)
+
+    reply = handle_turn(ctx, "s12d", "what material is this made of")
+
+    assert "cotton" in reply.lower()
+    assert "in stock" not in reply.lower()
+    assert "color:" not in reply.lower()
+
+
+def test_get_product_details_still_lists_variants_when_actually_asked(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    """The scoping above must not silently drop real facts when they ARE what was asked."""
+    session = session_store.get_or_create("s12f")
+    session.last_shown_product_ids = ["prod-tshirt-1"]
+    session_store.save(session)
+
+    scripted = _ScriptedLLMClient(
+        ActionCall(action_type="get_product_details", parameters={"raw_text": "what colors does it come in"})
+    )
+    ctx = _ctx(adapter, scripted, session_store)
+
+    reply = handle_turn(ctx, "s12f", "what colors does it come in")
+
+    assert "color:" in reply.lower()
+    assert "in stock" in reply.lower()
+
+
 def test_named_reference_with_trailing_chatter_resolves_against_the_last_shown_product(
     adapter: MockAdapter, session_store: SessionStore
 ) -> None:
