@@ -90,6 +90,24 @@ class TaxonomyResolver:
         # Apply curated synonym table first (e.g. "tee"/"tshirt" -> "t-shirts").
         normalized = snapshot.synonym_table.get(normalized, normalized)
 
+        # Real, confirmed live bug: "Men" is a literal substring of "Women" — the substring
+        # check below OR-matches both for the term "women", so a shopper typing the exact
+        # category name still got an ambiguous "did you mean: Men, Women?" question, and
+        # answering it with that very word ("Women") looped right back to the identical
+        # question forever (it always substring-matches "Men" too, no matter how many times
+        # it's repeated). This generalizes to any two category names where one is contained
+        # in the other. An exact, whole-string match against a real category wins outright —
+        # the same "verbatim exact name wins" precedent already used for products in
+        # agent/intents.py's _resolve_single_product — checked before the looser substring
+        # pass below ever gets a chance to introduce a false collision.
+        exact = [c for c in snapshot.categories if _normalize(c.name) == normalized]
+        if len(exact) == 1:
+            return ResolutionResult(
+                status=ResolutionStatus.EXACT,
+                resolved_id=exact[0].id,
+                snapshot_age_seconds=snapshot.age_seconds,
+            )
+
         matches = [
             Candidate(id=c.id, display_label=c.name)
             for c in snapshot.categories

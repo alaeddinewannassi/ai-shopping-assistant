@@ -30,6 +30,47 @@ def test_resolve_category_synonym_match() -> None:
         assert result.resolved_id == "cat-tshirts"
 
 
+def test_resolve_category_exact_name_wins_even_when_a_sibling_name_contains_it() -> None:
+    """Regression test for a real, confirmed live bug: "Men" is a literal substring of
+    "Women" — the old substring-only check OR-matched both categories for the term "women",
+    so a shopper who typed the EXACT category name still got an ambiguous "did you mean:
+    Men, Women?" question, and answering it with that very word ("Women") looped right back
+    to the identical question forever (it always substring-matches "Men" too, no matter how
+    many times it's repeated)."""
+    adapter = MockAdapter()
+    adapter._categories["cat-men"] = Category(id="cat-men", name="Men")
+    adapter._categories["cat-women"] = Category(id="cat-women", name="Women")
+    resolver = TaxonomyResolver(adapter)
+
+    result = resolver.resolve_category("Women")
+    assert result.status == ResolutionStatus.EXACT
+    assert result.resolved_id == "cat-women"
+
+    result = resolver.resolve_category("Men")
+    assert result.status == ResolutionStatus.EXACT
+    assert result.resolved_id == "cat-men"
+
+
+def test_resolve_category_exact_name_wins_among_overlapping_multi_word_names() -> None:
+    """Same bug, three-way: "Home" is a substring of "Home Accessories", and "Accessories"
+    is too — every one of "Home"/"Accessories"/"Home Accessories" typed exactly still came
+    back ambiguous against the other two under the old substring-only check."""
+    adapter = MockAdapter()
+    adapter._categories["cat-home"] = Category(id="cat-home", name="Home")
+    adapter._categories["cat-accessories"] = Category(id="cat-accessories", name="Accessories")
+    adapter._categories["cat-home-accessories"] = Category(id="cat-home-accessories", name="Home Accessories")
+    resolver = TaxonomyResolver(adapter)
+
+    for term, expected_id in [
+        ("Home", "cat-home"),
+        ("Accessories", "cat-accessories"),
+        ("Home Accessories", "cat-home-accessories"),
+    ]:
+        result = resolver.resolve_category(term)
+        assert result.status == ResolutionStatus.EXACT, f"failed for term={term!r}: {result}"
+        assert result.resolved_id == expected_id, f"failed for term={term!r}: {result}"
+
+
 def test_resolve_category_unsupported_term() -> None:
     resolver = make_resolver()
     result = resolver.resolve_category("nonexistent-category-xyz")

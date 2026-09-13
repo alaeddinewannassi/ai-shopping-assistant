@@ -89,14 +89,20 @@ def test_ambiguous_category_term_triggers_one_clarifying_question(
     llm_client: RuleBasedStubClient, session_store: SessionStore
 ) -> None:
     adapter = MockAdapter()
-    # Seed a second, deliberately overlapping category so "jacket" is genuinely ambiguous
-    # between two real categories — exercising ResolutionStatus.AMBIGUOUS end-to-end.
+    # Two categories that both genuinely contain "jacket" as a substring, with NEITHER an
+    # exact match for the shopper's own term — a real ambiguity, distinct from the "exact
+    # name wins" fast path (test_taxonomy_resolver.py's
+    # test_resolve_category_exact_name_wins_*): an exact match must never land here, which
+    # is why the plain "Jackets" category (an exact hit for this same search term) is
+    # removed rather than left in as a third, exactly-matching candidate.
+    del adapter._categories["cat-jackets"]
     adapter._categories["cat-rain-jackets"] = Category(id="cat-rain-jackets", name="Rain Jackets")
+    adapter._categories["cat-ski-jackets"] = Category(id="cat-ski-jackets", name="Ski Jackets")
 
     reply = handle_turn(_ctx(adapter, llm_client, session_store), "s4", "show me jackets")
     assert "?" in reply
     assert reply.count("?") == 1  # at most one clarifying question (FR-003)
-    assert "Jackets" in reply and "Rain Jackets" in reply
+    assert "Rain Jackets" in reply and "Ski Jackets" in reply
 
 
 # -- Scenario 4: no catalog matches -> plain message, no dead-end navigation --- #
