@@ -81,14 +81,19 @@ def test_overview_and_funnel_numbers_match_hand_computed_expectations(db) -> Non
         _event(tenant_id, "s2", t2, 1, "turn_completed", "turn_completed", "ok", elapsed_ms=50),
     ]
 
-    # Session 3: discovery + a proposal that's never confirmed, plus one store outage.
-    t3a, t3b = uuid.uuid4(), uuid.uuid4()
+    # Session 3: discovery + a proposal that's never confirmed, one store outage, and one
+    # LLM call failure (a real, confirmed live gap: "unavailable" was the only outcome ever
+    # counted as an error — a real Groq API 400/429 failure logs outcome "error" instead,
+    # from llm_client.py's _log_error, and used to be invisible to error_rate entirely).
+    t3a, t3b, t3c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     events += [
         _event(tenant_id, "s3", t3a, 0, "search_products", "search_products", "products"),
         _event(tenant_id, "s3", t3a, 1, "turn_completed", "turn_completed", "ok", elapsed_ms=150),
         _event(tenant_id, "s3", t3b, 0, "propose_add_to_cart", "propose", "pending"),
         _event(tenant_id, "s3", t3b, 1, "search_products", "search_products", "unavailable"),
         _event(tenant_id, "s3", t3b, 2, "turn_completed", "turn_completed", "ok", elapsed_ms=75),
+        _event(tenant_id, "s3", t3c, 0, "llm_call", "parse_turn", "error"),
+        _event(tenant_id, "s3", t3c, 1, "turn_completed", "turn_completed", "ok", elapsed_ms=25),
     ]
 
     # A different tenant's events must never leak into tenant_id's numbers.
@@ -132,14 +137,17 @@ def test_overview_and_funnel_numbers_match_hand_computed_expectations(db) -> Non
 
     overview = get_overview(db, tenant_id, start, end)
     assert overview.session_count == 3
-    # 3 turns in s1 (search, add-to-cart, checkout) + 2 in s3 (search, add-to-cart-attempt) + 1 in s2
-    assert overview.turn_count == 6
+    # 3 turns in s1 (search, add-to-cart, checkout) + 3 in s3 (search, add-to-cart-attempt,
+    # llm_call failure) + 1 in s2
+    assert overview.turn_count == 7
     assert overview.ordered_session_count == 1
     assert overview.conversion_rate == pytest.approx(1 / 3)
-    assert overview.avg_turn_latency_ms == pytest.approx((100 + 200 + 300 + 50 + 150 + 75) / 6)
-    assert overview.error_event_count == 1  # s3's "unavailable" search
+    assert overview.avg_turn_latency_ms == pytest.approx((100 + 200 + 300 + 50 + 150 + 75 + 25) / 7)
+    # s3's "unavailable" search AND its "error" llm_call — a real, confirmed live gap: the
+    # latter used to be invisible to error_rate entirely (see _ERROR_OUTCOMES's docstring).
+    assert overview.error_event_count == 2
     non_turn_total = sum(1 for e in events if e.tenant_id == tenant_id and e.intent != "turn_completed")
-    assert overview.error_rate == pytest.approx(1 / non_turn_total)
+    assert overview.error_rate == pytest.approx(2 / non_turn_total)
 
 
 def test_timeseries_buckets_by_day_and_zero_fills_days_with_no_activity(db) -> None:

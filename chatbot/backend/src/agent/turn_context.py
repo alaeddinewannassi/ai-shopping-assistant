@@ -37,14 +37,30 @@ class TurnContext:
     completion_tokens: int | None = None
     llm_ms: int | None = None
 
+    # Real, confirmed live gap: a hosted LLM provider hitting its free-tier rate limit makes
+    # FreeTierHostedLLMClient._post_with_retry sleep synchronously (up to
+    # _MAX_RETRY_BACKOFF_SECONDS) before retrying — real wall-clock time the shopper waited,
+    # but it measures Groq's throttling, not this system's own processing speed. Left in
+    # elapsed_ms, it skewed the backoffice's avg/p95 turn latency upward during any burst of
+    # traffic dense enough to hit the rate limit (exactly what a live testing session does) —
+    # an admin reading "p95 turn latency: 4927ms" would reasonably read that as "our system is
+    # slow," when the real story is "a free-tier quota got hit." Accumulated here and
+    # subtracted from elapsed_ms below, so what's reported reflects genuine processing time.
+    excluded_wait_ms: int = 0
+
     def next_seq(self) -> int:
         seq = self._next_seq
         self._next_seq += 1
         return seq
 
+    def record_excluded_wait(self, ms: int) -> None:
+        """Call after any deliberate, non-processing wait (e.g. a rate-limit retry backoff)
+        so elapsed_ms below doesn't count it as this system's own latency."""
+        self.excluded_wait_ms += ms
+
     @property
     def elapsed_ms(self) -> int:
-        return int((time.monotonic() - self.started_at) * 1000)
+        return max(0, int((time.monotonic() - self.started_at) * 1000) - self.excluded_wait_ms)
 
     def record_llm_usage(
         self,

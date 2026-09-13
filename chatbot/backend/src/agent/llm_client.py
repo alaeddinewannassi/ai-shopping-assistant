@@ -565,8 +565,15 @@ class FreeTierHostedLLMClient:
                 last_exc = exc
                 continue
             if response.status_code == 429 and attempt < self._MAX_ATTEMPTS - 1:
-                backoff = _as_float(response.headers.get("retry-after"), 1.0)
-                time.sleep(min(backoff, self._MAX_RETRY_BACKOFF_SECONDS))
+                backoff = min(_as_float(response.headers.get("retry-after"), 1.0), self._MAX_RETRY_BACKOFF_SECONDS)
+                time.sleep(backoff)
+                # Real rate-limit wait, not this system's own processing time — excluded
+                # from the turn's reported latency so a burst of 429s doesn't read as "our
+                # system got slow" in the backoffice's avg/p95 turn latency (see
+                # TurnContext.excluded_wait_ms's docstring).
+                turn = turn_context.current()
+                if turn is not None:
+                    turn.record_excluded_wait(int(backoff * 1000))
                 continue
             return response
         raise last_exc or RuntimeError("Groq request failed after retries")

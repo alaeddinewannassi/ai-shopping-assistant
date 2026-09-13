@@ -211,6 +211,32 @@ def test_groq_client_retries_once_on_429_then_succeeds() -> None:
     assert calls["count"] == 2
 
 
+def test_groq_client_excludes_429_retry_backoff_from_reported_turn_latency() -> None:
+    """Regression test for a real, confirmed live gap: a 429 retry's backoff sleep (up to
+    _MAX_RETRY_BACKOFF_SECONDS) happens synchronously inside the turn, so it used to count
+    toward TurnContext.elapsed_ms — the backoffice's avg/p95 turn latency stat. During a
+    burst of traffic dense enough to hit the free-tier rate limit (exactly what a live
+    testing session does), that reads as "our system got slow" when the real story is "a
+    rate limit got hit." The wait must be recorded as excluded, not counted as this
+    system's own processing time."""
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return httpx.Response(429, headers={"retry-after": "0.05"})
+        return _groq_response(name="search_products", arguments={"query": "shoes"})
+
+    client = FreeTierHostedLLMClient(api_key="fake-key", client=_mock_client(handler))
+
+    with turn_context.turn_scope(None, "s1") as turn:
+        action = client.parse_turn("shoes please", {}, session_id="s1")
+
+    assert action.action_type == "search_products"
+    assert turn.excluded_wait_ms >= 50
+    assert turn.elapsed_ms < turn.excluded_wait_ms  # the real work here is near-instant (mocked)
+
+
 def test_groq_client_logs_an_error_event_on_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     logged = {}
 

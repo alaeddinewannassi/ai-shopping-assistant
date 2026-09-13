@@ -21,10 +21,15 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 from tenancy_db.models.analytics import AssistantEvent, ConversationSessionRecord
 
-# The only outcome string that means "the store/adapter genuinely couldn't be reached" in
-# today's vocabulary (chatbot/backend's agent/dialogue.py) — out_of_stock/declined/
-# cart_state_changed are legitimate business outcomes, not errors.
-_ERROR_OUTCOMES = {"unavailable"}
+# Outcome strings that mean something genuinely broke (not the shopper's fault) —
+# out_of_stock/declined/cart_state_changed/promo_invalid/empty_cart are legitimate business
+# outcomes, never errors. Real, confirmed live gap: this used to only ever count
+# "unavailable" (the store/adapter genuinely unreachable), missing "error" entirely — the
+# outcome llm_client.py's parse_turn logs on a real LLM API failure (e.g. a 400 from the
+# provider). That specific failure showed up in a real session's raw event log, gracefully
+# recovered from at the shopper-facing level (a safe fallback reply, no crash) — but Overview's
+# error_rate stayed at 0%, hiding a real infrastructure problem an admin should see.
+_ERROR_OUTCOMES = {"unavailable", "error"}
 
 _MUTATION_ACTION_TYPES = {"add_cart_item", "update_cart_item", "remove_cart_item", "apply_promo"}
 
