@@ -146,17 +146,17 @@ def test_groq_client_records_token_usage_and_latency_on_turn_context() -> None:
         assert turn.llm_ms is not None and turn.llm_ms >= 0
 
 
-def test_groq_client_falls_back_to_search_on_timeout() -> None:
+def test_groq_client_falls_back_to_an_honest_message_on_timeout() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.TimeoutException("simulated timeout", request=request)
 
     client = FreeTierHostedLLMClient(api_key="fake-key", client=_mock_client(handler))
     action = client.parse_turn("do something", {})
-    assert action.action_type == "search_products"
-    assert action.parameters == {"query": "do something"}
+    assert action.action_type == "ask_or_chat"
+    assert "query" not in action.parameters
 
 
-def test_groq_client_falls_back_to_search_on_malformed_tool_arguments() -> None:
+def test_groq_client_falls_back_to_an_honest_message_on_malformed_tool_arguments() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -170,11 +170,10 @@ def test_groq_client_falls_back_to_search_on_malformed_tool_arguments() -> None:
 
     client = FreeTierHostedLLMClient(api_key="fake-key", client=_mock_client(handler))
     action = client.parse_turn("hello", {})
-    assert action.action_type == "search_products"
-    assert action.parameters == {"query": "hello"}
+    assert action.action_type == "ask_or_chat"
 
 
-def test_groq_client_falls_back_to_search_on_unrecognized_tool_name() -> None:
+def test_groq_client_falls_back_to_an_honest_message_on_unrecognized_tool_name() -> None:
     """research.md §9.6 (prompt-injection hygiene): a tool name the schema never offered
     must never reach dialogue.py — that's the LLM (or a manipulated response) trying to
     call something outside the fixed action vocabulary."""
@@ -184,16 +183,16 @@ def test_groq_client_falls_back_to_search_on_unrecognized_tool_name() -> None:
 
     client = FreeTierHostedLLMClient(api_key="fake-key", client=_mock_client(handler))
     action = client.parse_turn("hello", {})
-    assert action.action_type == "search_products"
+    assert action.action_type == "ask_or_chat"
 
 
-def test_groq_client_falls_back_to_search_when_no_tool_call_is_returned() -> None:
+def test_groq_client_falls_back_to_an_honest_message_when_no_tool_call_is_returned() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": [{"message": {}}], "usage": {}})
 
     client = FreeTierHostedLLMClient(api_key="fake-key", client=_mock_client(handler))
     action = client.parse_turn("hello", {})
-    assert action.action_type == "search_products"
+    assert action.action_type == "ask_or_chat"
 
 
 def test_groq_client_retries_once_on_429_then_succeeds() -> None:
@@ -284,6 +283,28 @@ def test_groq_client_logs_an_error_event_on_fallback(monkeypatch: pytest.MonkeyP
     assert logged["outcome"] == "error"
 
 
+def test_llm_failure_fallback_is_an_honest_message_not_a_misleading_product_search() -> None:
+    """Regression test for a real, confirmed live gap: the safe fallback used to be
+    search_products(query=<the shopper's raw message>) regardless of what that message was
+    actually about — a genuine policy question ("tell me about your delivery policy, like how
+    long it takes and what carrier you use") during a rate limit got treated as a catalog
+    search and came back with unrelated products as if that were a real answer. The fallback
+    must never touch the adapter (so it can't compound one failure with a second) and must
+    say honestly that something went wrong, not silently misinterpret the question."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"retry-after": "0"})
+
+    client = FreeTierHostedLLMClient(api_key="fake-key", client=_mock_client(handler))
+    action = client.parse_turn(
+        "hi, can you tell me about your delivery policy, like how long it takes and what carrier you use?",
+        {},
+    )
+
+    assert action.action_type == "ask_or_chat"
+    assert "trouble" in action.parameters["text"].lower()
+    assert "query" not in action.parameters
+
+
 def test_groq_client_logs_a_clean_rate_limited_outcome_when_retries_are_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -306,7 +327,7 @@ def test_groq_client_logs_a_clean_rate_limited_outcome_when_retries_are_exhauste
     client = FreeTierHostedLLMClient(api_key="fake-key", client=_mock_client(handler))
     action = client.parse_turn("hello", {}, session_id="session-43")
 
-    assert action.action_type == "search_products"  # safe fallback, turn never breaks
+    assert action.action_type == "ask_or_chat"  # safe fallback, turn never breaks
     assert logged["outcome"] == "rate_limited"
     assert logged["details"]["retry_after_seconds"] == 0.0
     assert "429 Too Many Requests" not in json.dumps(logged["details"])

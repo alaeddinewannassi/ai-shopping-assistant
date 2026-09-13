@@ -482,12 +482,24 @@ def _build_user_content(message: str, context: dict) -> str:
     return "\n".join(lines)
 
 
-def _fallback_action_call(message: str) -> ActionCall:
-    """Safe default when the LLM call fails, times out, or returns something unusable —
-    mirrors RuleBasedStubClient's own default for unrecognized input (research.md §9.6: a
-    malformed/adversarial LLM response must never reach dialogue.py as anything but a safe,
-    read-only fallback)."""
-    return ActionCall(action_type="search_products", parameters={"query": message})
+def _fallback_action_call() -> ActionCall:
+    """Safe default when the LLM call fails, times out, or returns something unusable — a
+    read-only, non-mutating action either way (research.md §9.6: a malformed/adversarial LLM
+    response must never reach dialogue.py as anything but a safe, read-only fallback).
+
+    NOT search_products(query=message): real, confirmed live gap — this fires regardless of
+    what the message was actually about, so a genuine policy/FAQ question ("tell me about
+    your delivery policy") during a rate limit got treated as a catalog search and came back
+    with unrelated products ("Hummingbird printed t-shirt; ...") as if that were a real
+    answer — actively misleading, not just unhelpful. An honest "having trouble, try again"
+    is a better default for the common case (the message usually ISN'T a product search),
+    costs no adapter call (so it can't compound the failure with a second one), and is no
+    worse for the product-search case either, since the LLM being down means no real
+    understanding of the message happened either way."""
+    return ActionCall(
+        action_type="ask_or_chat",
+        parameters={"text": "Sorry, I'm having a bit of trouble right now — please try again in a moment."},
+    )
 
 
 def _as_float(value: Any, default: float) -> float:
@@ -556,7 +568,7 @@ class FreeTierHostedLLMClient:
             action = self._call_groq(message, context)
         except Exception as exc:  # noqa: BLE001 - an LLM hiccup must never break a chat turn
             self._log_error(session_id, exc)
-            return _fallback_action_call(message)
+            return _fallback_action_call()
         return action
 
     def _call_groq(self, message: str, context: dict) -> ActionCall:
