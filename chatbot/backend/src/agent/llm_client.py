@@ -497,6 +497,13 @@ def _as_float(value: Any, default: float) -> float:
         return default
 
 
+def _as_int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class _RateLimitExceededError(Exception):
     """Internal marker: Groq's free-tier rate limit was still in effect after
     _post_with_retry's one retry — distinct from an arbitrary/unexpected failure so
@@ -586,7 +593,7 @@ class FreeTierHostedLLMClient:
         except json.JSONDecodeError as exc:
             raise ValueError(f"Malformed tool arguments: {exc}") from exc
 
-        self._record_usage(data.get("usage") or {}, elapsed_ms)
+        self._record_usage(data.get("usage") or {}, elapsed_ms, response.headers)
         return ActionCall(action_type=action_type, parameters=arguments)
 
     def _post_with_retry(self, payload: dict, headers: dict) -> httpx.Response:
@@ -611,7 +618,7 @@ class FreeTierHostedLLMClient:
             return response
         raise last_exc or RuntimeError("Groq request failed after retries")
 
-    def _record_usage(self, usage: dict, elapsed_ms: int) -> None:
+    def _record_usage(self, usage: dict, elapsed_ms: int, headers: httpx.Headers) -> None:
         turn = turn_context.current()
         if turn is None:
             return
@@ -621,6 +628,14 @@ class FreeTierHostedLLMClient:
             prompt_tokens=usage.get("prompt_tokens"),
             completion_tokens=usage.get("completion_tokens"),
             llm_ms=elapsed_ms,
+            # Groq's live rate-limit headroom for THIS model (rate limits are per-model, not
+            # per-key/account — confirmed live: two models on the same key had independent
+            # remaining-request counts). Best-effort — an older/different provider's response
+            # simply won't carry these, and that's fine, not every field here is guaranteed.
+            ratelimit_limit_requests=_as_int_or_none(headers.get("x-ratelimit-limit-requests")),
+            ratelimit_remaining_requests=_as_int_or_none(headers.get("x-ratelimit-remaining-requests")),
+            ratelimit_limit_tokens=_as_int_or_none(headers.get("x-ratelimit-limit-tokens")),
+            ratelimit_remaining_tokens=_as_int_or_none(headers.get("x-ratelimit-remaining-tokens")),
         )
 
     def _log_error(self, session_id: str | None, exc: Exception, *, action: str = "parse_turn") -> None:
@@ -678,7 +693,7 @@ class FreeTierHostedLLMClient:
         if not content or not content.strip():
             raise ValueError("Groq returned an empty rephrasing")
 
-        self._record_usage(data.get("usage") or {}, elapsed_ms)
+        self._record_usage(data.get("usage") or {}, elapsed_ms, response.headers)
         return content.strip()
 
 

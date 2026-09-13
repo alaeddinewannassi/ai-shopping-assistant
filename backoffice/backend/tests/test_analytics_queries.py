@@ -33,7 +33,18 @@ def db():
 
 
 def _event(
-    tenant_id, session_id, turn_id, seq, intent, action, outcome, *, details=None, elapsed_ms=None
+    tenant_id,
+    session_id,
+    turn_id,
+    seq,
+    intent,
+    action,
+    outcome,
+    *,
+    details=None,
+    elapsed_ms=None,
+    prompt_tokens=None,
+    completion_tokens=None,
 ):
     return AssistantEvent(
         event_id=uuid.uuid4(),
@@ -47,6 +58,8 @@ def _event(
         outcome=outcome,
         details=details or {},
         turn_elapsed_ms=elapsed_ms,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
     )
 
 
@@ -198,6 +211,37 @@ def test_timeseries_buckets_by_day_and_zero_fills_days_with_no_activity(db) -> N
     assert points[2].turn_count == 2
 
 
+def test_timeseries_sums_real_llm_tokens_per_day(db) -> None:
+    """The trend chart's third toggle, added so an admin can watch real token consumption
+    against Groq's free-tier quota over time instead of only reading it off a live snapshot —
+    no new capture needed, prompt_tokens/completion_tokens are already written per turn (see
+    turn_context.py's record_llm_usage, added for the p95-latency fix)."""
+    tenant_id = uuid.uuid4()
+    day = datetime(2026, 8, 27, 10, 0, 0, tzinfo=UTC)
+    t1, t2 = uuid.uuid4(), uuid.uuid4()
+    events = [
+        _event(
+            tenant_id, "s1", t1, 0, "turn_completed", "turn_completed", "ok",
+            elapsed_ms=100, prompt_tokens=50, completion_tokens=10,
+        ),
+        _event(
+            tenant_id, "s1", t2, 0, "turn_completed", "turn_completed", "ok",
+            elapsed_ms=100, prompt_tokens=30, completion_tokens=5,
+        ),
+        # RuleBasedStubClient-driven turn — no real LLM call, tokens stay None.
+        _event(tenant_id, "s1", uuid.uuid4(), 0, "turn_completed", "turn_completed", "ok", elapsed_ms=10),
+    ]
+    for e in events:
+        e.occurred_at = day
+    db.add_all(events)
+    db.commit()
+
+    points = get_timeseries(db, tenant_id, day - timedelta(hours=1), day + timedelta(hours=1))
+
+    assert len(points) == 1
+    assert points[0].llm_tokens == 95  # (50+10) + (30+5) + 0
+
+
 def test_timeseries_never_leaks_another_tenants_events(db) -> None:
     tenant_id = uuid.uuid4()
     other_tenant_id = uuid.uuid4()
@@ -227,6 +271,59 @@ def test_empty_range_returns_zeroed_metrics_not_a_crash(db) -> None:
     assert overview.checkout_rate == 0.0
     assert overview.avg_turn_latency_ms is None
     assert overview.error_rate == 0.0
+
+
+def test_overview_reports_the_freshest_llm_ratelimit_snapshot_in_range(db) -> None:
+    """Backs the backoffice's LLM capacity gauge: turn_context.py rides Groq's live
+    rate-limit headers onto whichever turn_completed event made the real call — Overview must
+    surface the MOST RECENT one in the selected range (capacity only ever gets staler, never
+    fresher, between calls), not just any one, and must not crash on turns that never made a
+    real LLM call (RuleBasedStubClient) or have no ratelimit info at all."""
+    tenant_id = uuid.uuid4()
+    t1, t2, t3 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    earlier = _NOW - timedelta(minutes=5)
+    events = [
+        _event(
+            tenant_id, "s1", t1, 0, "turn_completed", "turn_completed", "ok",
+            details={
+                "ratelimit_limit_requests": 1000, "ratelimit_remaining_requests": 995,
+                "ratelimit_limit_tokens": 8000, "ratelimit_remaining_tokens": 7950,
+            },
+        ),
+        _event(
+            tenant_id, "s1", t2, 0, "turn_completed", "turn_completed", "ok",
+            details={
+                "ratelimit_limit_requests": 1000, "ratelimit_remaining_requests": 993,
+                "ratelimit_limit_tokens": 8000, "ratelimit_remaining_tokens": 7927,
+            },
+        ),
+        # RuleBasedStubClient-driven turn — no ratelimit info at all, must be skipped, not crash.
+        _event(tenant_id, "s1", t3, 0, "turn_completed", "turn_completed", "ok"),
+    ]
+    events[0].occurred_at = earlier  # older snapshot — must be superseded by events[1]
+    db.add_all(events)
+    db.commit()
+
+    overview = get_overview(db, tenant_id, _NOW - timedelta(hours=1), _NOW + timedelta(hours=1))
+
+    assert overview.llm_requests_remaining == 993
+    assert overview.llm_requests_limit == 1000
+    assert overview.llm_tokens_remaining == 7927
+    assert overview.llm_tokens_limit == 8000
+    assert overview.llm_snapshot_at is not None
+
+
+def test_overview_llm_snapshot_fields_are_none_when_no_turn_made_a_real_llm_call(db) -> None:
+    tenant_id = uuid.uuid4()
+    t1 = uuid.uuid4()
+    _e = _event(tenant_id, "s1", t1, 0, "turn_completed", "turn_completed", "ok")
+    db.add(_e)
+    db.commit()
+
+    overview = get_overview(db, tenant_id, _NOW - timedelta(hours=1), _NOW + timedelta(hours=1))
+
+    assert overview.llm_requests_remaining is None
+    assert overview.llm_snapshot_at is None
 
 
 def test_rate_limited_llm_calls_count_toward_error_rate(db) -> None:

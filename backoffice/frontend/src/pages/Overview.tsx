@@ -6,12 +6,30 @@ import { StatTile } from "../components/StatTile";
 import { DateRangePicker, defaultRange, type DateRange } from "../components/DateRangePicker";
 import { TimeseriesChart } from "../components/TimeseriesChart";
 
-type TrendMetric = "session_count" | "turn_count";
+type TrendMetric = "session_count" | "turn_count" | "llm_tokens";
 
 const TREND_METRICS: { key: TrendMetric; label: string }[] = [
   { key: "session_count", label: "Sessions" },
   { key: "turn_count", label: "Turns" },
+  { key: "llm_tokens", label: "LLM tokens" },
 ];
+
+function _timeAgo(iso: string): string {
+  const seconds = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  return `${hours}h ago`;
+}
+
+function _headroomTone(remaining: number, limit: number): "critical" | "warning" | "default" {
+  if (limit <= 0) return "default";
+  const ratio = remaining / limit;
+  if (ratio < 0.1) return "critical";
+  if (ratio < 0.3) return "warning";
+  return "default";
+}
 
 export function Overview() {
   const [tenantId] = useSelectedTenant();
@@ -80,6 +98,37 @@ export function Overview() {
             value={`${(data.error_rate * 100).toFixed(1)}%`}
             tone={data.error_rate > 0.05 ? "critical" : "default"}
           />
+        </div>
+      )}
+
+      {data && data.llm_snapshot_at != null && (
+        <div
+          style={{
+            marginTop: 24,
+            padding: 16,
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            background: "var(--surface-1)",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+            <h2 style={{ margin: 0, fontSize: 16 }}>LLM capacity</h2>
+            <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+              Groq free-tier headroom for this model, as of {_timeAgo(data.llm_snapshot_at)}
+            </span>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 12 }}>
+            <StatTile
+              label="Requests remaining"
+              value={`${data.llm_requests_remaining!.toLocaleString()} / ${data.llm_requests_limit!.toLocaleString()}`}
+              tone={_headroomTone(data.llm_requests_remaining!, data.llm_requests_limit!)}
+            />
+            <StatTile
+              label="Tokens remaining"
+              value={`${data.llm_tokens_remaining!.toLocaleString()} / ${data.llm_tokens_limit!.toLocaleString()}`}
+              tone={_headroomTone(data.llm_tokens_remaining!, data.llm_tokens_limit!)}
+            />
+          </div>
         </div>
       )}
 

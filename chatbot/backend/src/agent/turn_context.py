@@ -37,6 +37,17 @@ class TurnContext:
     completion_tokens: int | None = None
     llm_ms: int | None = None
 
+    # Groq's live rate-limit headroom for the model used this turn, read straight off its
+    # response headers (rate limits are per-model, not per-key/account — confirmed live).
+    # Snapshot-shaped, not summed: log_turn_completed() (logging/audit.py) rides these into
+    # the turn_completed event's free-form `details` JSON (no schema migration) so the
+    # backoffice can show "capacity remaining as of the last real call" — the only way to
+    # know this short of the admin dashboard itself burning quota by polling Groq directly.
+    ratelimit_limit_requests: int | None = None
+    ratelimit_remaining_requests: int | None = None
+    ratelimit_limit_tokens: int | None = None
+    ratelimit_remaining_tokens: int | None = None
+
     # Real, confirmed live gap: a hosted LLM provider hitting its free-tier rate limit makes
     # FreeTierHostedLLMClient._post_with_retry sleep synchronously (up to
     # _MAX_RETRY_BACKOFF_SECONDS) before retrying — real wall-clock time the shopper waited,
@@ -70,6 +81,10 @@ class TurnContext:
         prompt_tokens: int | None,
         completion_tokens: int | None,
         llm_ms: int,
+        ratelimit_limit_requests: int | None = None,
+        ratelimit_remaining_requests: int | None = None,
+        ratelimit_limit_tokens: int | None = None,
+        ratelimit_remaining_tokens: int | None = None,
     ) -> None:
         """Called once per turn by an LLMClient that made a real network call — never by
         RuleBasedStubClient. `log_turn_completed()` (logging/audit.py) reads these fields
@@ -79,6 +94,10 @@ class TurnContext:
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
         self.llm_ms = llm_ms
+        self.ratelimit_limit_requests = ratelimit_limit_requests
+        self.ratelimit_remaining_requests = ratelimit_remaining_requests
+        self.ratelimit_limit_tokens = ratelimit_limit_tokens
+        self.ratelimit_remaining_tokens = ratelimit_remaining_tokens
 
 
 _current: ContextVar[TurnContext | None] = ContextVar("_current_turn_context", default=None)

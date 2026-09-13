@@ -57,6 +57,18 @@ class OverviewMetrics:
     p95_turn_latency_ms: float | None
     error_event_count: int
     error_rate: float  # error_event_count / non-turn_completed events, 0.0 if none
+    # Groq's live rate-limit headroom for the model in use, as of the most recent real LLM
+    # call in the selected range (turn_context.py's record_llm_usage rode these onto that
+    # turn_completed event's details — see log_turn_completed). All None when no turn in
+    # range made a real call (e.g. RuleBasedStubClient, or simply no traffic yet this range) —
+    # this is a point-in-time snapshot, not an aggregate, so there's nothing to show instead
+    # of "unknown" in that case. llm_snapshot_at says how fresh the reading is; there's no
+    # live-poll alternative that wouldn't itself burn the very quota it's reporting on.
+    llm_requests_limit: int | None = None
+    llm_requests_remaining: int | None = None
+    llm_tokens_limit: int | None = None
+    llm_tokens_remaining: int | None = None
+    llm_snapshot_at: str | None = None
 
 
 @dataclass
@@ -84,6 +96,12 @@ class DailyPoint:
     date: str  # ISO calendar date (YYYY-MM-DD), tenant-agnostic UTC day boundary
     session_count: int
     turn_count: int
+    # Real LLM tokens actually consumed that day (prompt_tokens + completion_tokens, summed
+    # from turn_completed events that made a real model call — see turn_context.py's
+    # record_llm_usage). Already-captured data, no new instrumentation needed: this just
+    # reads columns that were already being written for the p95-latency fix, to answer "am I
+    # about to run out of my free-tier quota" with a real trend instead of a guess.
+    llm_tokens: int = 0
 
 
 def get_overview(db: Session, tenant_id: uuid.UUID, start: datetime, end: datetime) -> OverviewMetrics:
@@ -96,6 +114,7 @@ def get_overview(db: Session, tenant_id: uuid.UUID, start: datetime, end: dateti
     error_count = sum(1 for e in non_turn_events if e.outcome in _ERROR_OUTCOMES)
 
     checkout_count = _count_sessions_with_outcome(db, tenant_id, session_ids, {"checkout", "ordered"})
+    llm_snapshot = _latest_llm_ratelimit_snapshot(turn_events)
 
     return OverviewMetrics(
         session_count=len(session_ids),
@@ -106,7 +125,23 @@ def get_overview(db: Session, tenant_id: uuid.UUID, start: datetime, end: dateti
         p95_turn_latency_ms=_percentile(latencies, 0.95) if latencies else None,
         error_event_count=error_count,
         error_rate=(error_count / len(non_turn_events)) if non_turn_events else 0.0,
+        **llm_snapshot,
     )
+
+
+def _latest_llm_ratelimit_snapshot(turn_events: list[AssistantEvent]) -> dict:
+    candidates = [e for e in turn_events if (e.details or {}).get("ratelimit_remaining_requests") is not None]
+    if not candidates:
+        return {}
+    latest = max(candidates, key=lambda e: e.occurred_at)
+    details = latest.details
+    return {
+        "llm_requests_limit": details.get("ratelimit_limit_requests"),
+        "llm_requests_remaining": details.get("ratelimit_remaining_requests"),
+        "llm_tokens_limit": details.get("ratelimit_limit_tokens"),
+        "llm_tokens_remaining": details.get("ratelimit_remaining_tokens"),
+        "llm_snapshot_at": latest.occurred_at.isoformat(),
+    }
 
 
 def get_funnel(db: Session, tenant_id: uuid.UUID, start: datetime, end: datetime) -> FunnelMetrics:
@@ -172,11 +207,15 @@ def get_timeseries(db: Session, tenant_id: uuid.UUID, start: datetime, end: date
     events = _events_in_range(db, tenant_id, start, end)
     sessions_by_day: dict[str, set[str]] = {}
     turns_by_day: dict[str, int] = {}
+    tokens_by_day: dict[str, int] = {}
     for e in events:
         day = e.occurred_at.date().isoformat()
         sessions_by_day.setdefault(day, set()).add(e.session_id)
         if e.intent == "turn_completed":
             turns_by_day[day] = turns_by_day.get(day, 0) + 1
+            tokens_by_day[day] = (
+                tokens_by_day.get(day, 0) + (e.prompt_tokens or 0) + (e.completion_tokens or 0)
+            )
 
     points: list[DailyPoint] = []
     current = start.date()
@@ -188,6 +227,7 @@ def get_timeseries(db: Session, tenant_id: uuid.UUID, start: datetime, end: date
                 date=key,
                 session_count=len(sessions_by_day.get(key, ())),
                 turn_count=turns_by_day.get(key, 0),
+                llm_tokens=tokens_by_day.get(key, 0),
             )
         )
         current += timedelta(days=1)

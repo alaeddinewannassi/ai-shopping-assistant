@@ -109,6 +109,15 @@ export interface OverviewMetrics {
   p95_turn_latency_ms: number | null;
   error_event_count: number;
   error_rate: number;
+  // Groq's live rate-limit headroom for the model in use, as of the most recent real LLM
+  // call in the selected range — all null when no such turn exists in range. Rate limits are
+  // per-model, not per-key/account (confirmed live: two models on the same key had
+  // independent remaining-request counts).
+  llm_requests_limit: number | null;
+  llm_requests_remaining: number | null;
+  llm_tokens_limit: number | null;
+  llm_tokens_remaining: number | null;
+  llm_snapshot_at: string | null;
 }
 
 export interface FunnelMetrics {
@@ -129,6 +138,7 @@ export interface DailyPoint {
   date: string; // ISO calendar date, YYYY-MM-DD
   session_count: number;
   turn_count: number;
+  llm_tokens: number;
 }
 
 export interface SessionSummary {

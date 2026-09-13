@@ -498,6 +498,15 @@ components:
         p95_turn_latency_ms: { type: number, nullable: true }
         error_event_count: { type: integer }
         error_rate: { type: number }
+        # Groq's live rate-limit headroom for the model in use, as of the most recent real
+        # LLM call in the selected range — all null when no such turn exists in range (e.g.
+        # the rule-based stub, or simply no traffic yet). Rate limits are per-model, not
+        # per-key/account (confirmed live).
+        llm_requests_limit: { type: integer, nullable: true }
+        llm_requests_remaining: { type: integer, nullable: true }
+        llm_tokens_limit: { type: integer, nullable: true }
+        llm_tokens_remaining: { type: integer, nullable: true }
+        llm_snapshot_at: { type: string, format: date-time, nullable: true }
 
     FunnelMetrics:
       type: object
@@ -520,6 +529,10 @@ components:
         date: { type: string, format: date }
         session_count: { type: integer }
         turn_count: { type: integer }
+        # Real LLM tokens consumed that day (prompt + completion, from turns that made a real
+        # model call) — the Overview trend chart's third toggle, tracking usage against the
+        # free-tier quota over time.
+        llm_tokens: { type: integer }
 
     SessionSummary:
       type: object

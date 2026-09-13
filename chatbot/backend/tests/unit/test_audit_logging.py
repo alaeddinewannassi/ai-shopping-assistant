@@ -13,11 +13,13 @@ import logging
 import pytest
 
 from src.adapters.mock import MockAdapter
+from src.agent import turn_context
 from src.agent.dialogue import DialogueContext, handle_turn
 from src.agent.intents import CartIntentHandler, DiscoveryIntentHandler
 from src.agent.llm_client import RuleBasedStubClient
 from src.agent.pending import PendingActionGate
 from src.agent.taxonomy_resolver import TaxonomyResolver
+from src.logging.audit import log_turn_completed
 from src.session.catalog_cache import CatalogSnapshotCache
 from src.session.store import SessionStore
 
@@ -39,6 +41,48 @@ def ctx() -> DialogueContext:
 
 def _records(caplog: pytest.LogCaptureFixture) -> list[dict]:
     return [json.loads(r.message) for r in caplog.records]
+
+
+def test_turn_completed_carries_live_ratelimit_headroom_when_a_real_llm_call_made_one(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Backs the backoffice's LLM capacity gauge: turn_context.py's record_llm_usage captures
+    Groq's live rate-limit headers, and this is the one place that reads them back onto the
+    durably-stored turn_completed event (details is already free-form JSON — no new column
+    needed, since this is a point-in-time snapshot, not something to sum across rows)."""
+    caplog.set_level(logging.INFO, logger="assistant.audit")
+    with turn_context.turn_scope(None, "s1") as turn:
+        turn.record_llm_usage(
+            provider="free-tier-hosted",
+            model="openai/gpt-oss-120b",
+            prompt_tokens=50,
+            completion_tokens=10,
+            llm_ms=200,
+            ratelimit_limit_requests=1000,
+            ratelimit_remaining_requests=993,
+            ratelimit_limit_tokens=8000,
+            ratelimit_remaining_tokens=7927,
+        )
+        log_turn_completed("s1")
+
+    record = _records(caplog)[0]
+    assert record["details"]["ratelimit_remaining_requests"] == 993
+    assert record["details"]["ratelimit_limit_requests"] == 1000
+    assert record["details"]["ratelimit_remaining_tokens"] == 7927
+    assert record["details"]["ratelimit_limit_tokens"] == 8000
+
+
+def test_turn_completed_omits_ratelimit_fields_when_no_real_llm_call_was_made(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """RuleBasedStubClient never calls record_llm_usage — every existing turn_completed
+    event's details shape must stay exactly as-is (no null ratelimit_* clutter)."""
+    caplog.set_level(logging.INFO, logger="assistant.audit")
+    with turn_context.turn_scope(None, "s1"):
+        log_turn_completed("s1")
+
+    record = _records(caplog)[0]
+    assert "ratelimit_remaining_requests" not in record["details"]
 
 
 def test_unavailable_store_during_update_proposal_is_logged(

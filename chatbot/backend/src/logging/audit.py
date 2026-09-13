@@ -123,6 +123,16 @@ def log_turn_completed(
         details["message"] = message
     if reply is not None:
         details["reply"] = reply
+    # Groq's live rate-limit headroom for the model used this turn (turn_context.py's
+    # record_llm_usage) — only present on a turn that made a real LLM call. Rides in this
+    # event's existing free-form `details` JSON rather than new columns: it's a point-in-time
+    # snapshot, not something meant to be summed/aggregated across rows the way
+    # prompt_tokens/completion_tokens are, so it doesn't need the same treatment those got.
+    if turn is not None and turn.ratelimit_remaining_requests is not None:
+        details["ratelimit_limit_requests"] = turn.ratelimit_limit_requests
+        details["ratelimit_remaining_requests"] = turn.ratelimit_remaining_requests
+        details["ratelimit_limit_tokens"] = turn.ratelimit_limit_tokens
+        details["ratelimit_remaining_tokens"] = turn.ratelimit_remaining_tokens
     log_action(session_id, "turn_completed", "turn_completed", "ok", details=details)
 
 

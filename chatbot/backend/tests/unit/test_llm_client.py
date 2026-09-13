@@ -237,6 +237,34 @@ def test_groq_client_excludes_429_retry_backoff_from_reported_turn_latency() -> 
     assert turn.elapsed_ms < turn.excluded_wait_ms  # the real work here is near-instant (mocked)
 
 
+def test_groq_client_records_live_ratelimit_headroom_from_response_headers() -> None:
+    """Backs the backoffice's LLM capacity gauge: Groq's rate limits are per-model, not
+    per-key/account (confirmed live — two models on the same key had independent remaining-
+    request counts), so the only way to know "how close to the ceiling are we right now" is
+    reading it straight off a real call's response headers, not guessing from a fixed number."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = _groq_response(name="search_products", arguments={"query": "shoes"})
+        response.headers.update(
+            {
+                "x-ratelimit-limit-requests": "1000",
+                "x-ratelimit-remaining-requests": "993",
+                "x-ratelimit-limit-tokens": "8000",
+                "x-ratelimit-remaining-tokens": "7927",
+            }
+        )
+        return response
+
+    client = FreeTierHostedLLMClient(api_key="fake-key", client=_mock_client(handler))
+
+    with turn_context.turn_scope(None, "s1") as turn:
+        client.parse_turn("shoes please", {}, session_id="s1")
+
+    assert turn.ratelimit_limit_requests == 1000
+    assert turn.ratelimit_remaining_requests == 993
+    assert turn.ratelimit_limit_tokens == 8000
+    assert turn.ratelimit_remaining_tokens == 7927
+
+
 def test_groq_client_logs_an_error_event_on_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     logged = {}
 
