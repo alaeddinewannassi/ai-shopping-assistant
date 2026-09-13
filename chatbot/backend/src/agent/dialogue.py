@@ -1032,17 +1032,32 @@ _CART_LINK_ACTION_TYPES = {
 def _upsert_conversation_session(ctx: DialogueContext, session_id: str) -> None:
     """Best-effort per-session analytics summary (T309) — a no-op with no tenant resolved
     (ctx.tenant_id is None, e.g. every DialogueContext built directly by pre-002 tests) or
-    with the tenancy database unreachable. `outcome` only ever tracks "ordered" here: cart
-    lines aren't visible without an extra adapter round-trip this function deliberately
-    doesn't make (a chat turn must never pay analytics-classification latency, plan.md D4)
-    — "cart" outcome classification is a documented gap, not silently faked."""
+    with the tenancy database unreachable.
+
+    Real, confirmed live bug (found via a backoffice admin comparing the two): the Funnel
+    page correctly counted 12 "Cart mutated" sessions for a tenant/period, but the Sessions
+    list showed EVERY session (all 49) with outcome "browsing" — this used to only ever set
+    "ordered" here, with "cart" classification skipped as a documented gap on the theory
+    that it needed "an extra adapter round-trip" this function deliberately avoids (a chat
+    turn must never pay analytics-classification latency, plan.md D4). That reasoning didn't
+    hold up: session.last_turn_auto_navigate_to_cart is ALREADY set, at zero extra cost,
+    exactly when this turn just confirmed a real cart mutation (add/update/remove) — no
+    round-trip needed, the data was already in memory. ConversationSessionRepository.
+    upsert_turn's ranking (browsing < cart < ordered) already handles this safely — outcome
+    only ever moves forward, so a later "browsing" turn (outcome=None here) never downgrades
+    an already-cart/ordered session."""
     if ctx.tenant_id is None:
         return
     from tenancy_db.engine import session_scope
     from tenancy_db.repositories import ConversationSessionRepository
 
     session = ctx.session_store.get_or_create(session_id)
-    outcome = "ordered" if session.has_completed_order else None
+    if session.has_completed_order:
+        outcome = "ordered"
+    elif session.last_turn_auto_navigate_to_cart:
+        outcome = "cart"
+    else:
+        outcome = None
     try:
         with session_scope() as db:
             if db is None:

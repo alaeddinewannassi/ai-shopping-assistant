@@ -68,6 +68,34 @@ def test_full_turn_emits_events_with_non_null_turn_latency(monkeypatch, tmp_path
     assert [e.seq for e in first_turn_events] == list(range(len(first_turn_events)))
 
 
+def test_confirmed_cart_mutation_is_classified_as_cart_outcome_not_browsing(monkeypatch, tmp_path) -> None:
+    """Regression test for a real, confirmed live bug (found via a backoffice admin
+    comparing pages): the Funnel page correctly counted sessions reaching "cart_mutated"
+    from the event stream, but the Sessions list showed every single one of them with
+    outcome "browsing" — _upsert_conversation_session only ever wrote "ordered" or left the
+    default alone, treating "cart" classification as a documented gap requiring an "extra
+    adapter round-trip" it deliberately skipped. That reasoning was wrong: whether this turn
+    just confirmed a real cart mutation is already known for free via
+    session.last_turn_auto_navigate_to_cart, no round-trip needed."""
+    runtime, config = _configured_runtime(monkeypatch, tmp_path)
+
+    handle_turn(runtime.dialogue_ctx, "pipeline-session-2", "add the red classic t-shirt to my cart")
+    handle_turn(runtime.dialogue_ctx, "pipeline-session-2", "yes")
+
+    from tenancy_db.engine import session_scope
+    from tenancy_db.models.analytics import ConversationSessionRecord
+    import sqlalchemy as sa
+
+    with session_scope() as db:
+        record = db.scalars(
+            sa.select(ConversationSessionRecord).where(
+                ConversationSessionRecord.tenant_id == config.tenant_id,
+                ConversationSessionRecord.session_id == "pipeline-session-2",
+            )
+        ).one()
+        assert record.outcome == "cart"
+
+
 def test_chat_still_succeeds_when_database_is_unconfigured(monkeypatch) -> None:
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("PRESTASHOP_BASE_URL", raising=False)
