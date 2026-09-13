@@ -21,7 +21,9 @@ from src.adapters.base import (
     ProductNotFoundError,
     PromoInvalidError,
 )
+from src.adapters.matching import token_matches_name
 from src.agent.intents import (
+    _BARE_REFERENCE_TERMS,
     _ORDINAL_PATTERN,
     CartIntentHandler,
     CartResolutionKind,
@@ -30,6 +32,7 @@ from src.agent.intents import (
     DiscoveryOutcome,
     PromoIntentHandler,
     PromoResolutionKind,
+    _clean_reference_term,
 )
 from src.agent.llm_client import ActionCall, LLMClient
 from src.agent.pending import PendingActionError, PendingActionGate
@@ -176,6 +179,14 @@ def _record_navigation(
         # (CartIntentHandler.resolve_add_to_cart) — same 5-item cap as _format_products.
         session.last_shown_products = _format_products(outcome.products)
         session.last_shown_product_ids = [p.id for p in outcome.products[:5]]
+        changed = True
+    if session.pending_product_clarify_ids:
+        # A fresh search/navigate result supersedes whatever add-to-cart clarifying question
+        # was still open — leaving it set could wrongly let _pending_product_clarify_override
+        # hijack an unrelated later reply that happens to share a word with the stale
+        # candidates.
+        session.pending_product_clarify_ids = []
+        session.pending_product_clarify_names = []
         changed = True
     if changed:
         session_store.save(session)
@@ -401,6 +412,38 @@ def _bare_confirmation_add_override(session: ConversationSession, message: str) 
     return bool(session.last_shown_product_ids) and bool(_ORDINAL_PATTERN.search(cleaned))
 
 
+def _pending_product_clarify_override(session: ConversationSession, message: str) -> bool:
+    """True when this turn should be routed straight to propose_add_to_cart without asking
+    the LLM: an AMBIGUOUS_PRODUCT clarifying question ("did you mean: Mountain fox notebook,
+    Brown bear notebook, Hummingbird notebook?") is still open, and this message plausibly
+    names one of those exact candidates.
+
+    Real, confirmed live bug: a real hosted LLM inconsistently classified a follow-up like
+    "brown bear one" or "the notebook" as search_products or ask_or_chat instead of
+    continuing the add-to-cart flow, even though it named one of the candidates just
+    offered — the shopper had to repeat themselves 2-3 extra times before it finally routed
+    correctly. The bare word/ordinal case ("yes", "the first one") is already covered by
+    _bare_confirmation_add_override; this covers the more specific but still unambiguous
+    case of actually naming (part of) a candidate, which that function deliberately leaves
+    to the LLM since it isn't a bare reference. Never fires on a message that shares no real
+    signal with any candidate, so a genuine topic change ("actually show me jackets") still
+    gets the LLM's real judgment rather than a forced, wrong NOT_FOUND-style reply. A real
+    pending yes/no, or a still-open variant question (a later stage of the same flow),
+    always takes priority."""
+    if session.pending_action is not None or session.pending_variant_product_id is not None:
+        return False
+    if not session.pending_product_clarify_names:
+        return False
+    term = _clean_reference_term(message)
+    if not term or term in _BARE_REFERENCE_TERMS:
+        return False  # bare references are _bare_confirmation_add_override's job, not this one
+    tokens = [t for t in term.split() if len(t) > 2]
+    return any(
+        any(token_matches_name(t, name) for t in tokens)
+        for name in session.pending_product_clarify_names
+    )
+
+
 def _handle_propose_add_to_cart(
     ctx: DialogueContext,
     session_id: str,
@@ -423,10 +466,16 @@ def _handle_propose_add_to_cart(
             session.pending_variant_product_name = ""
             ctx.session_store.save(session)
 
+    def _clear_pending_product_clarify() -> None:
+        if session.pending_product_clarify_ids:
+            session.pending_product_clarify_ids = []
+            session.pending_product_clarify_names = []
+            ctx.session_store.save(session)
+
     if resolution.kind == CartResolutionKind.UNAVAILABLE:
-        # Deliberately leaves any pending_variant_product_id untouched — this is a transient
-        # adapter outage, not an answer to (or abandonment of) the open variant question, so a
-        # retry should still resolve against the same product.
+        # Deliberately leaves any pending_variant_product_id/pending_product_clarify_ids
+        # untouched — this is a transient adapter outage, not an answer to (or abandonment
+        # of) the open clarifying question, so a retry should still resolve against it.
         log_action(session_id, "propose_add_to_cart", "search_products", "unavailable")
         return (
             "I can't reach the store's catalog right now, so I can't verify that product. "
@@ -434,6 +483,7 @@ def _handle_propose_add_to_cart(
         )
     if resolution.kind == CartResolutionKind.NOT_FOUND:
         _clear_pending_variant()
+        _clear_pending_product_clarify()
         return "I couldn't find a product matching that — could you tell me its name?"
     if resolution.kind == CartResolutionKind.AMBIGUOUS_PRODUCT:
         _clear_pending_variant()
@@ -442,9 +492,14 @@ def _handle_propose_add_to_cart(
         # clarifying list to narrow against — it re-ran an unconstrained catalog-wide search
         # and surfaced a DIFFERENT, wider ambiguous set sharing the same keywords. Persisted
         # the same way a search/navigate result is (_record_navigation) so the existing
-        # last-shown intersection narrowing in _resolve_single_product picks it up.
+        # last-shown intersection narrowing in _resolve_single_product picks it up. Also kept
+        # separately as pending_product_clarify_ids/names (see that field's docstring) so
+        # _pending_product_clarify_override can route the next turn straight back here even
+        # when a real hosted LLM misclassifies it as search_products/ask_or_chat.
         if resolution.candidate_ids:
             session.last_shown_product_ids = resolution.candidate_ids
+            session.pending_product_clarify_ids = resolution.candidate_ids
+            session.pending_product_clarify_names = resolution.candidates
             ctx.session_store.save(session)
         return _format_clarifying_question(resolution.candidates)
     if resolution.kind == CartResolutionKind.AMBIGUOUS_VARIANT:
@@ -454,6 +509,7 @@ def _handle_propose_add_to_cart(
         # something to resolve against on the NEXT turn instead of falling back to whatever
         # was last searched/shown, which may be a stale, unrelated result. See
         # ConversationSession.pending_variant_product_id's docstring for the full rationale.
+        _clear_pending_product_clarify()
         session.pending_variant_product_id = resolution.product.id
         session.pending_variant_product_name = resolution.product.name
         ctx.session_store.save(session)
@@ -464,6 +520,7 @@ def _handle_propose_add_to_cart(
     if resolution.kind == CartResolutionKind.OUT_OF_STOCK:
         assert resolution.product is not None and resolution.variant is not None
         _clear_pending_variant()
+        _clear_pending_product_clarify()
         if resolution.alternatives:
             alt = ", ".join(
                 ", ".join(f"{k}: {v}" for k, v in alt_variant.attributes.items())
@@ -477,6 +534,7 @@ def _handle_propose_add_to_cart(
     if resolution.kind == CartResolutionKind.INSUFFICIENT_STOCK:
         assert resolution.product is not None and resolution.variant is not None
         _clear_pending_variant()
+        _clear_pending_product_clarify()
         variant_desc = ", ".join(f"{k}: {v}" for k, v in resolution.variant.attributes.items())
         return (
             f"Sorry, {resolution.product.name} ({variant_desc}) only has "
@@ -487,6 +545,7 @@ def _handle_propose_add_to_cart(
     assert resolution.kind == CartResolutionKind.RESOLVED
     assert resolution.product is not None and resolution.variant is not None
     _clear_pending_variant()
+    _clear_pending_product_clarify()
     recap = build_add_to_cart_recap(resolution.product, resolution.variant, resolution.quantity)
     action = ctx.pending_gate.propose(
         session_id,
@@ -1111,6 +1170,9 @@ def _route_turn(
         action = ActionCall(action_type="propose_add_to_cart", parameters={"raw_text": message})
     elif ctx.cart_handler and ctx.pending_gate and _bare_confirmation_add_override(session, message):
         # Deterministic fast path — see _bare_confirmation_add_override's docstring.
+        action = ActionCall(action_type="propose_add_to_cart", parameters={"raw_text": message})
+    elif ctx.cart_handler and ctx.pending_gate and _pending_product_clarify_override(session, message):
+        # Deterministic fast path — see _pending_product_clarify_override's docstring.
         action = ActionCall(action_type="propose_add_to_cart", parameters={"raw_text": message})
     elif ctx.pending_gate and _bare_view_cart_override(session, message):
         # Deterministic fast path — see _bare_view_cart_override's docstring.

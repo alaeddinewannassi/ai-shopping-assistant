@@ -91,6 +91,18 @@ class ConversationSession:
     # last searched (which could be a stale, unrelated discovery result).
     pending_variant_product_id: str | None = None
     pending_variant_product_name: str = ""
+    # Real, confirmed live bug: after an AMBIGUOUS_PRODUCT clarifying question ("did you
+    # mean: Mountain fox notebook, Brown bear notebook, Hummingbird notebook?"), a real
+    # hosted LLM inconsistently classified the shopper's answer ("brown bear one", "the
+    # notebook") as search_products or ask_or_chat instead of continuing the add-to-cart
+    # flow — forcing the shopper to repeat themselves several times even though the reply
+    # named one of the candidates just offered. Mirrors pending_variant_product_id/_name's
+    # role for the variant-level version of this same reliability gap: lets a deterministic
+    # override (dialogue.py's _pending_product_clarify_override) route the very next turn
+    # straight to propose_add_to_cart without needing the LLM to classify it correctly at
+    # all. Cleared once resolved to a single product (or a clearly different flow starts).
+    pending_product_clarify_ids: list[str] = field(default_factory=list)
+    pending_product_clarify_names: list[str] = field(default_factory=list)
     pending_action: PendingAction | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -232,6 +244,8 @@ class SessionStore:
                 last_turn_needs_confirmation=data.get("last_turn_needs_confirmation", False),
                 pending_variant_product_id=data.get("pending_variant_product_id"),
                 pending_variant_product_name=data.get("pending_variant_product_name", ""),
+                pending_product_clarify_ids=data.get("pending_product_clarify_ids", []),
+                pending_product_clarify_names=data.get("pending_product_clarify_names", []),
                 pending_action=PendingAction(**pending) if pending else None,
                 created_at=data.get("created_at", time.time()),
                 updated_at=data.get("updated_at", time.time()),

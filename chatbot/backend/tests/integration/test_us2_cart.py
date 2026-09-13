@@ -451,6 +451,51 @@ def test_ambiguous_add_to_cart_candidates_are_remembered_for_the_next_turn(
     assert "cushion" not in second.lower()
 
 
+def test_naming_an_ambiguous_candidate_without_the_word_add_still_continues_the_cart_flow(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    """Regression test for a real, confirmed live bug: after an AMBIGUOUS_PRODUCT clarifying
+    question, a real hosted LLM inconsistently classified a bare follow-up naming one of the
+    candidates ("brown bear one", with no "add"/"buy" verb at all) as search_products or
+    ask_or_chat instead of continuing the add-to-cart flow — the shopper had to repeat
+    themselves several extra times before it finally routed correctly, even though the reply
+    unambiguously named one of the candidates just offered. RuleBasedStubClient's own regex
+    classifier has the exact same gap (no "add" verb -> falls through to search_products),
+    which makes it the right stand-in here: the fix must intercept BEFORE the LLM/stub is
+    ever asked to classify this turn, not depend on it guessing correctly."""
+    from src.adapters.base import Product, Variant
+
+    for pid, name in [
+        ("prod-mountain-fox-nb", "Mountain fox notebook"),
+        ("prod-hummingbird-nb", "Hummingbird notebook"),
+        ("prod-brown-bear-nb", "Brown bear notebook"),
+        ("prod-brown-bear-cushion", "Brown bear cushion"),
+        ("prod-brown-bear-vector", "Brown bear - Vector graphics"),
+    ]:
+        adapter._products[pid] = Product(
+            id=pid,
+            name=name,
+            category_id="cat-jackets",
+            base_price=12.90,
+            variants=[Variant(id=f"{pid}-v", attributes={}, price=12.90, in_stock=True, stock_quantity=10)],
+        )
+    ctx = _ctx(adapter, llm_client, session_store)
+
+    first = handle_turn(ctx, "u22", "add a notebook to my cart")
+    assert "did you mean" in first.lower()
+
+    # No "add"/"buy" verb — RuleBasedStubClient alone would classify this as search_products.
+    second = handle_turn(ctx, "u22", "brown bear one")
+
+    assert "did you mean" not in second.lower()
+    assert "confirm" in second.lower() or "yes" in second.lower()  # a genuine add proposal
+    assert "Brown bear notebook" in second
+    assert "cushion" not in second.lower()
+    session = session_store.get_or_create("u22")
+    assert session.pending_action is not None
+    assert session.pending_action.action_type == "add_cart_item"
+
+
 def test_cart_action_marks_the_turn_as_cart_link_worthy(
     adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
 ) -> None:
