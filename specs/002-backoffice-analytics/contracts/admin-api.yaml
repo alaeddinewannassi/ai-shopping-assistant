@@ -507,6 +507,10 @@ components:
         llm_tokens_limit: { type: integer, nullable: true }
         llm_tokens_remaining: { type: integer, nullable: true }
         llm_snapshot_at: { type: string, format: date-time, nullable: true }
+        # Set only when the most recent relevant LLM signal is an active throttle (a more
+        # recent successful call, or the window elapsing, both clear it) — an ISO deadline
+        # the backoffice ticks down live rather than polling Groq directly.
+        llm_rate_limited_until: { type: string, format: date-time, nullable: true }
 
     FunnelMetrics:
       type: object

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { useSelectedTenant } from "../lib/auth";
 import { StatTile } from "../components/StatTile";
@@ -23,12 +23,38 @@ function _timeAgo(iso: string): string {
   return `${hours}h ago`;
 }
 
-function _headroomTone(remaining: number, limit: number): "critical" | "warning" | "default" {
-  if (limit <= 0) return "default";
+function _headroomTone(remaining: number, limit: number): "critical" | "warning" | "good" {
+  if (limit <= 0) return "good";
   const ratio = remaining / limit;
   if (ratio < 0.1) return "critical";
   if (ratio < 0.3) return "warning";
-  return "default";
+  return "good";
+}
+
+function _formatCountdown(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+/** Ticks down live from an ISO deadline rather than polling Groq directly — that would burn
+ * the very quota it's reporting on. null once there's no deadline, or it's already passed. */
+function useCountdownSeconds(deadlineIso: string | null): number | null {
+  const [remaining, setRemaining] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!deadlineIso) {
+      setRemaining(null);
+      return;
+    }
+    const deadlineMs = new Date(deadlineIso).getTime();
+    const tick = () => setRemaining(Math.max(0, Math.round((deadlineMs - Date.now()) / 1000)));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [deadlineIso]);
+
+  return remaining;
 }
 
 export function Overview() {
@@ -47,6 +73,9 @@ export function Overview() {
     queryFn: () => api.getTimeseries(tenantId!, range.start, range.end),
     enabled: !!tenantId,
   });
+
+  const rateLimitSecondsRemaining = useCountdownSeconds(data?.llm_rate_limited_until ?? null);
+  const isRateLimited = rateLimitSecondsRemaining != null && rateLimitSecondsRemaining > 0;
 
   if (!tenantId) return <p>No tenant selected.</p>;
 
@@ -101,7 +130,7 @@ export function Overview() {
         </div>
       )}
 
-      {data && data.llm_snapshot_at != null && (
+      {data && (data.llm_snapshot_at != null || isRateLimited) && (
         <div
           style={{
             marginTop: 24,
@@ -113,22 +142,32 @@ export function Overview() {
         >
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
             <h2 style={{ margin: 0, fontSize: 16 }}>LLM capacity</h2>
-            <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
-              Groq free-tier headroom for this model, as of {_timeAgo(data.llm_snapshot_at)}
-            </span>
+            {isRateLimited ? (
+              <span style={{ fontSize: 13, color: "var(--critical)", fontWeight: 600 }}>
+                ⏱ Rate limited — resets in {_formatCountdown(rateLimitSecondsRemaining!)}
+              </span>
+            ) : (
+              data.llm_snapshot_at != null && (
+                <span style={{ fontSize: 13, color: "var(--good)" }}>
+                  ✓ Free tier available · as of {_timeAgo(data.llm_snapshot_at)}
+                </span>
+              )
+            )}
           </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 12 }}>
-            <StatTile
-              label="Requests remaining"
-              value={`${data.llm_requests_remaining!.toLocaleString()} / ${data.llm_requests_limit!.toLocaleString()}`}
-              tone={_headroomTone(data.llm_requests_remaining!, data.llm_requests_limit!)}
-            />
-            <StatTile
-              label="Tokens remaining"
-              value={`${data.llm_tokens_remaining!.toLocaleString()} / ${data.llm_tokens_limit!.toLocaleString()}`}
-              tone={_headroomTone(data.llm_tokens_remaining!, data.llm_tokens_limit!)}
-            />
-          </div>
+          {data.llm_snapshot_at != null && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 12 }}>
+              <StatTile
+                label="Requests remaining"
+                value={`${data.llm_requests_remaining!.toLocaleString()} / ${data.llm_requests_limit!.toLocaleString()}`}
+                tone={_headroomTone(data.llm_requests_remaining!, data.llm_requests_limit!)}
+              />
+              <StatTile
+                label="Tokens remaining"
+                value={`${data.llm_tokens_remaining!.toLocaleString()} / ${data.llm_tokens_limit!.toLocaleString()}`}
+                tone={_headroomTone(data.llm_tokens_remaining!, data.llm_tokens_limit!)}
+              />
+            </div>
+          )}
         </div>
       )}
 

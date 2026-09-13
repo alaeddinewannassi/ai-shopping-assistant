@@ -32,6 +32,7 @@ const BASE_OVERVIEW = {
   llm_tokens_limit: null,
   llm_tokens_remaining: null,
   llm_snapshot_at: null,
+  llm_rate_limited_until: null,
 };
 
 function renderPage() {
@@ -86,6 +87,56 @@ describe("Overview LLM capacity gauge", () => {
 
     await screen.findByText("Checkout rate");
     expect(screen.queryByText("LLM capacity")).not.toBeInTheDocument();
+  });
+
+  it("shows a green available label with the freshest snapshot's age when not rate limited", async () => {
+    vi.mocked(api.getOverview).mockResolvedValue({
+      ...BASE_OVERVIEW,
+      llm_requests_limit: 1000,
+      llm_requests_remaining: 993,
+      llm_tokens_limit: 8000,
+      llm_tokens_remaining: 7927,
+      llm_snapshot_at: new Date(Date.now() - 5000).toISOString(),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(/Free tier available/)).toBeInTheDocument();
+    expect(screen.queryByText(/Rate limited/)).not.toBeInTheDocument();
+  });
+
+  it("shows a live countdown instead of the available label while actively rate limited", async () => {
+    // Regression test for a real gap: an admin had no way to tell "can shoppers get real LLM
+    // help right now" without checking a session's raw event log — the rate_limited event's
+    // own retry_after_seconds + timestamp already IS a real deadline, no new capture needed.
+    vi.mocked(api.getOverview).mockResolvedValue({
+      ...BASE_OVERVIEW,
+      llm_requests_limit: 1000,
+      llm_requests_remaining: 3,
+      llm_tokens_limit: 8000,
+      llm_tokens_remaining: 0,
+      llm_snapshot_at: new Date(Date.now() - 60_000).toISOString(),
+      llm_rate_limited_until: new Date(Date.now() + 125_000).toISOString(), // ~2:05 remaining
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(/Rate limited — resets in 2:0\d/)).toBeInTheDocument();
+    expect(screen.queryByText(/Free tier available/)).not.toBeInTheDocument();
+    // Stale capacity numbers stay visible alongside the countdown — still useful context.
+    expect(screen.getByText("3 / 1,000")).toBeInTheDocument();
+  });
+
+  it("shows the countdown even when no successful call has happened yet in range", async () => {
+    vi.mocked(api.getOverview).mockResolvedValue({
+      ...BASE_OVERVIEW,
+      llm_rate_limited_until: new Date(Date.now() + 30_000).toISOString(),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText("LLM capacity")).toBeInTheDocument();
+    expect(await screen.findByText(/Rate limited — resets in 0:\d\d/)).toBeInTheDocument();
   });
 
   it("plots real LLM token consumption as a third trend toggle", async () => {

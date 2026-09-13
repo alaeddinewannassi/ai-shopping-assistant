@@ -118,6 +118,9 @@ export interface OverviewMetrics {
   llm_tokens_limit: number | null;
   llm_tokens_remaining: number | null;
   llm_snapshot_at: string | null;
+  // Set only when the most recent relevant LLM signal is an active throttle — an ISO
+  // deadline to tick down live, not a fixed "resets at midnight" style reset.
+  llm_rate_limited_until: string | null;
 }
 
 export interface FunnelMetrics {

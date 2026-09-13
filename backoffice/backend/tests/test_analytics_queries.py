@@ -326,6 +326,72 @@ def test_overview_llm_snapshot_fields_are_none_when_no_turn_made_a_real_llm_call
     assert overview.llm_snapshot_at is None
 
 
+def test_overview_shows_a_live_countdown_when_currently_rate_limited(db) -> None:
+    """The backoffice's "is the free tier available right now" indicator: a rate_limited
+    llm_call event's own retry_after_seconds + its timestamp IS a real deadline — no new
+    capture needed. Uses real wall-clock time (not the fixed _NOW fixture) since the deadline
+    is compared against actual "now", not the selected range's boundary."""
+    tenant_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    e = _event(
+        tenant_id, "s1", uuid.uuid4(), 0, "llm_call", "parse_turn", "rate_limited",
+        details={"reason": "Groq free-tier rate limit reached for this model", "retry_after_seconds": 300},
+    )
+    e.occurred_at = now - timedelta(seconds=5)
+    db.add(e)
+    db.commit()
+
+    overview = get_overview(db, tenant_id, now - timedelta(hours=1), now + timedelta(hours=1))
+
+    assert overview.llm_rate_limited_until is not None
+    deadline = datetime.fromisoformat(overview.llm_rate_limited_until)
+    assert 290 <= (deadline - now).total_seconds() <= 300
+
+
+def test_overview_countdown_is_cleared_once_the_window_has_elapsed(db) -> None:
+    tenant_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    e = _event(
+        tenant_id, "s1", uuid.uuid4(), 0, "llm_call", "parse_turn", "rate_limited",
+        details={"retry_after_seconds": 60},
+    )
+    e.occurred_at = now - timedelta(seconds=120)  # window (60s) elapsed 60s ago
+    db.add(e)
+    db.commit()
+
+    overview = get_overview(db, tenant_id, now - timedelta(hours=1), now + timedelta(hours=1))
+
+    assert overview.llm_rate_limited_until is None
+
+
+def test_overview_countdown_is_cleared_by_a_more_recent_successful_call(db) -> None:
+    """A rate_limited event isn't the last word if the model recovered afterward — a
+    successful call logged AFTER it must supersede the stale throttle signal."""
+    tenant_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    rate_limited = _event(
+        tenant_id, "s1", uuid.uuid4(), 0, "llm_call", "parse_turn", "rate_limited",
+        details={"retry_after_seconds": 300},
+    )
+    rate_limited.occurred_at = now - timedelta(seconds=200)
+    recovered = _event(
+        tenant_id, "s1", uuid.uuid4(), 0, "turn_completed", "turn_completed", "ok",
+        elapsed_ms=100,
+        details={
+            "ratelimit_limit_requests": 1000, "ratelimit_remaining_requests": 999,
+            "ratelimit_limit_tokens": 8000, "ratelimit_remaining_tokens": 7950,
+        },
+    )
+    recovered.occurred_at = now - timedelta(seconds=100)  # after the rate_limited event
+    db.add_all([rate_limited, recovered])
+    db.commit()
+
+    overview = get_overview(db, tenant_id, now - timedelta(hours=1), now + timedelta(hours=1))
+
+    assert overview.llm_rate_limited_until is None
+    assert overview.llm_requests_remaining == 999
+
+
 def test_rate_limited_llm_calls_count_toward_error_rate(db) -> None:
     """Regression test for a real gap: llm_client.py now logs a throttled-Groq-quota turn as
     its own distinct "rate_limited" outcome (not a generic "error") so an admin can tell a

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
@@ -69,6 +69,15 @@ class OverviewMetrics:
     llm_tokens_limit: int | None = None
     llm_tokens_remaining: int | None = None
     llm_snapshot_at: str | None = None
+    # Set only when the MOST RECENT relevant LLM signal (compared against llm_snapshot_at
+    # above) is an active throttle — llm_client.py's _RateLimitExceededError already carries
+    # retry_after_seconds, and the rate_limited event's own occurred_at is exactly when that
+    # window started, so `occurred_at + retry_after_seconds` is a real deadline, not a guess.
+    # None whenever the free tier is currently usable: no rate_limited event at all, a more
+    # recent successful call superseded it, or its window has already elapsed relative to
+    # now. The backoffice ticks this down live rather than polling Groq directly, which would
+    # burn the very quota it's reporting on.
+    llm_rate_limited_until: str | None = None
 
 
 @dataclass
@@ -115,6 +124,9 @@ def get_overview(db: Session, tenant_id: uuid.UUID, start: datetime, end: dateti
 
     checkout_count = _count_sessions_with_outcome(db, tenant_id, session_ids, {"checkout", "ordered"})
     llm_snapshot = _latest_llm_ratelimit_snapshot(turn_events)
+    llm_snapshot["llm_rate_limited_until"] = _active_rate_limit_deadline(
+        non_turn_events, llm_snapshot.get("llm_snapshot_at")
+    )
 
     return OverviewMetrics(
         session_count=len(session_ids),
@@ -142,6 +154,38 @@ def _latest_llm_ratelimit_snapshot(turn_events: list[AssistantEvent]) -> dict:
         "llm_tokens_remaining": details.get("ratelimit_remaining_tokens"),
         "llm_snapshot_at": latest.occurred_at.isoformat(),
     }
+
+
+def _as_utc(value: datetime) -> datetime:
+    """SQLite (used in tests) can hand back a naive datetime for a `DateTime(timezone=True)`
+    column even though Postgres never does — created_at_column's own default is `utcnow`,
+    so naive here always means UTC, never local time."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _active_rate_limit_deadline(non_turn_events: list[AssistantEvent], llm_snapshot_at: str | None) -> str | None:
+    """An ISO deadline (occurred_at + retry_after_seconds) if the most recent rate_limited
+    llm_call event's window is still running, real "now" compared, not the selected range's
+    boundary — a shopper could still be inside a throttle window an hour after the range
+    technically ended. None whenever a MORE RECENT successful call already superseded it
+    (llm_snapshot_at), the window already elapsed, or there's no rate_limited event at all."""
+    rate_limited = [
+        e
+        for e in non_turn_events
+        if e.intent == "llm_call"
+        and e.outcome == "rate_limited"
+        and isinstance((e.details or {}).get("retry_after_seconds"), (int, float))
+    ]
+    if not rate_limited:
+        return None
+    latest = max(rate_limited, key=lambda e: e.occurred_at)
+    latest_at = _as_utc(latest.occurred_at)
+    if llm_snapshot_at is not None and datetime.fromisoformat(llm_snapshot_at) >= latest_at:
+        return None
+    deadline = latest_at + timedelta(seconds=latest.details["retry_after_seconds"])
+    if deadline <= datetime.now(UTC):
+        return None
+    return deadline.isoformat()
 
 
 def get_funnel(db: Session, tenant_id: uuid.UUID, start: datetime, end: datetime) -> FunnelMetrics:
