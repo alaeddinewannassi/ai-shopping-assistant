@@ -408,6 +408,49 @@ def test_add_to_cart_falls_back_to_the_page_the_shopper_is_literally_on(
     assert "Classic T-Shirt" in reply
 
 
+def test_ambiguous_add_to_cart_candidates_are_remembered_for_the_next_turn(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    """Regression test for a real, confirmed live bug: an AMBIGUOUS_PRODUCT clarifying
+    question ("did you mean: Mountain fox notebook, Brown bear notebook, Hummingbird
+    notebook?") was never persisted as session.last_shown_product_ids the way a search
+    result is. A follow-up naming one of those very candidates but not verbatim by its full
+    catalog name ("brown bear one" — "one" isn't part of any real name) re-ran an
+    unconstrained catalog-wide search instead, surfacing a DIFFERENT, wider ambiguous set
+    that happens to share the same two words ("Brown bear cushion", "Brown bear - Vector
+    graphics", "Brown bear notebook") — the shopper never even mentioned a cushion or a
+    vector graphic. Persisting the clarifying candidates lets the existing last-shown
+    intersection narrowing (already used to resolve stale-context bugs) collapse the two
+    ambiguous sets down to the one candidate genuinely common to both."""
+    from src.adapters.base import Product, Variant
+
+    for pid, name in [
+        ("prod-mountain-fox-nb", "Mountain fox notebook"),
+        ("prod-hummingbird-nb", "Hummingbird notebook"),
+        ("prod-brown-bear-nb", "Brown bear notebook"),
+        ("prod-brown-bear-cushion", "Brown bear cushion"),
+        ("prod-brown-bear-vector", "Brown bear - Vector graphics"),
+    ]:
+        adapter._products[pid] = Product(
+            id=pid,
+            name=name,
+            category_id="cat-jackets",
+            base_price=12.90,
+            variants=[Variant(id=f"{pid}-v", attributes={}, price=12.90, in_stock=True, stock_quantity=10)],
+        )
+    ctx = _ctx(adapter, llm_client, session_store)
+
+    first = handle_turn(ctx, "u21", "add a notebook to my cart")
+    assert "did you mean" in first.lower()
+    assert "Brown bear cushion" not in first  # not even offered the first time
+
+    second = handle_turn(ctx, "u21", "add the brown bear one")
+
+    assert "did you mean" not in second.lower()
+    assert "Brown bear notebook" in second
+    assert "cushion" not in second.lower()
+
+
 def test_cart_action_marks_the_turn_as_cart_link_worthy(
     adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
 ) -> None:

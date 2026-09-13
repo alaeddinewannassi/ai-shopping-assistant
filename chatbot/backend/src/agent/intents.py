@@ -518,6 +518,15 @@ class CartResolution:
     variant: Optional[Variant] = None
     quantity: int = 1
     candidates: list[str] = field(default_factory=list)
+    # Real, confirmed live bug: an AMBIGUOUS_PRODUCT clarifying question ("did you mean:
+    # Mountain fox notebook, Brown bear notebook, Hummingbird notebook?") was never persisted
+    # as session.last_shown_product_ids the way a search/navigate result is — so a follow-up
+    # naming one of the very candidates just offered ("brown bear one") had nothing to narrow
+    # against and re-ran an unconstrained catalog-wide search instead, surfacing a DIFFERENT,
+    # wider ambiguous set (Brown bear cushion, Brown bear - Vector graphics, Brown bear
+    # notebook — anything sharing those two words). Carries the real ids alongside the
+    # display names in `candidates` so dialogue.py can persist them the same way.
+    candidate_ids: list[str] = field(default_factory=list)
     alternatives: list[Variant] = field(default_factory=list)
     line: Optional[CartLine] = None
     available_quantity: int = 0
@@ -603,6 +612,7 @@ class CartIntentHandler:
                 return CartResolution(
                     kind=CartResolutionKind.AMBIGUOUS_PRODUCT,
                     candidates=[p.name for p in candidates],
+                    candidate_ids=[p.id for p in candidates],
                 )
             return CartResolution(kind=CartResolutionKind.NOT_FOUND)
 

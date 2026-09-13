@@ -437,6 +437,15 @@ def _handle_propose_add_to_cart(
         return "I couldn't find a product matching that — could you tell me its name?"
     if resolution.kind == CartResolutionKind.AMBIGUOUS_PRODUCT:
         _clear_pending_variant()
+        # Real, confirmed live bug: without this, a follow-up naming one of the very
+        # candidates just offered ("brown bear one") had no memory of this specific
+        # clarifying list to narrow against — it re-ran an unconstrained catalog-wide search
+        # and surfaced a DIFFERENT, wider ambiguous set sharing the same keywords. Persisted
+        # the same way a search/navigate result is (_record_navigation) so the existing
+        # last-shown intersection narrowing in _resolve_single_product picks it up.
+        if resolution.candidate_ids:
+            session.last_shown_product_ids = resolution.candidate_ids
+            ctx.session_store.save(session)
         return _format_clarifying_question(resolution.candidates)
     if resolution.kind == CartResolutionKind.AMBIGUOUS_VARIANT:
         assert resolution.product is not None
