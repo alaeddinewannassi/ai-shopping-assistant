@@ -104,3 +104,26 @@ def test_list_category_names_excludes_prestashops_internal_root_category() -> No
     resolver = TaxonomyResolver(adapter)
     assert "Root" not in resolver.list_category_names()
     assert set(resolver.list_category_names()) == {"T-Shirts", "Jackets"}
+
+
+# -- list_descendant_category_ids (real bug: umbrella categories found no products) ---- #
+
+
+def test_list_descendant_category_ids_returns_children_and_grandchildren() -> None:
+    """Regression test for a real, confirmed live bug: "show me clothes" found nothing —
+    "Clothes" is an umbrella category with no products directly attached to it, only
+    subcategories ("Men", "Women") that hold the real products."""
+    adapter = MockAdapter()
+    adapter._categories["cat-clothes"] = Category(id="cat-clothes", name="Clothes")
+    adapter._categories["cat-tshirts"].parent_id = "cat-clothes"
+    adapter._categories["cat-jackets"].parent_id = "cat-clothes"
+    resolver = TaxonomyResolver(adapter)
+
+    descendants = resolver.list_descendant_category_ids("cat-clothes")
+
+    assert set(descendants) == {"cat-tshirts", "cat-jackets"}
+
+
+def test_list_descendant_category_ids_is_empty_for_a_leaf_category() -> None:
+    resolver = make_resolver()
+    assert resolver.list_descendant_category_ids("cat-tshirts") == []

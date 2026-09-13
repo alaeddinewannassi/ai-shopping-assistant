@@ -156,21 +156,42 @@ class DiscoveryIntentHandler:
                 kind=DiscoveryKind.CLARIFY, clarifying_options=category_result.candidates
             )
         if category_result is not None and category_result.status == ResolutionStatus.EXACT:
-            category_outcome = self._run_search(
-                cache_key=f"search:{term}:{max_price}:cat{category_result.resolved_id}",
-                query="",
-                filters={**filters, "category_id": category_result.resolved_id},
-            )
-            if category_outcome.kind != DiscoveryKind.NO_MATCH:
-                return category_outcome
+            cache_key = f"search:{term}:{max_price}:cat{category_result.resolved_id}"
+            try:
+                products = self._search_including_subcategories(category_result.resolved_id, filters)
+            except AdapterUnavailableError as exc:
+                _log_unavailable(cache_key, exc)
+                return self._degraded_or_unavailable(cache_key)
+            if products:
+                self._cache.put(cache_key, [asdict(p) for p in products])
+                return DiscoveryOutcome(kind=DiscoveryKind.PRODUCTS, products=products)
             # The resolver's category match is a loose substring check (see
             # taxonomy_resolver._normalize) — fine for a short category term ("t-shirt"),
             # but a full sentence that merely mentions a category word in passing ("she
             # likes clothes, maybe a t-shirt") can "exact"-match an umbrella category with
-            # no directly-attached products. An empty category shouldn't shadow a real
-            # keyword match sitting elsewhere in the catalog — fall back to plain search.
+            # no products anywhere under it either. An empty category shouldn't shadow a
+            # real keyword match sitting elsewhere in the catalog — fall back to plain search.
 
         return self._run_search(cache_key=f"search:{term}:{max_price}", query=term, filters=filters)
+
+    def _search_including_subcategories(self, category_id: str, filters: dict) -> list[Product]:
+        """Merges products directly in category_id with (only if it has none of its own)
+        every product in its subcategories, deduped by product id — see
+        TaxonomyResolver.list_descendant_category_ids' docstring for the live bug this fixes
+        (an umbrella category like "Clothes" often holds no products directly, only
+        subcategories like "Men"/"Women" that do). Raises AdapterUnavailableError exactly
+        like a single search_products call — callers handle it identically to before."""
+        products = self._adapter.search_products(query="", filters={**filters, "category_id": category_id})
+        if products:
+            return products
+        seen: set[str] = set()
+        merged: list[Product] = []
+        for descendant_id in self._resolver.list_descendant_category_ids(category_id):
+            for product in self._adapter.search_products(query="", filters={**filters, "category_id": descendant_id}):
+                if product.id not in seen:
+                    seen.add(product.id)
+                    merged.append(product)
+        return merged
 
     def handle_navigate(self, raw_text: str) -> DiscoveryOutcome:
         """Scenario 2 (navigate to a named category/product)."""
@@ -192,9 +213,7 @@ class DiscoveryIntentHandler:
             # authoritative source of whether the category still actually has data
             # (research.md §9.2).
             try:
-                products = self._adapter.search_products(
-                    filters={"category_id": category_result.resolved_id}
-                )
+                products = self._search_including_subcategories(category_result.resolved_id, {})
             except AdapterUnavailableError as exc:
                 _log_unavailable(f"navigate:{term}", exc)
                 return self._degraded_or_unavailable(f"nav:{term}")

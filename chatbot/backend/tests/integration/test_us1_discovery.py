@@ -135,6 +135,41 @@ def test_empty_umbrella_category_false_match_falls_back_to_keyword_search(
     assert "couldn't find" not in reply
 
 
+def test_umbrella_category_with_real_subcategories_surfaces_their_products(
+    llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    """Regression test for a real, confirmed live bug: "show me clothes" found nothing at
+    all, even though the store genuinely sells clothes — "Clothes" is an umbrella category
+    with no products directly attached to it, only subcategories ("Men"/"T-Shirts",
+    "Women"/"Jackets") that hold the real products. Neither the category-scoped search nor
+    the keyword fallback (no product is literally named "clothes") ever found them before."""
+    adapter = MockAdapter()
+    adapter._categories["cat-clothes"] = Category(id="cat-clothes", name="Clothes")
+    adapter._categories["cat-tshirts"].parent_id = "cat-clothes"
+    adapter._categories["cat-jackets"].parent_id = "cat-clothes"
+
+    reply = handle_turn(_ctx(adapter, llm_client, session_store), "s4c", "show me clothes")
+
+    assert "couldn't find" not in reply.lower()
+    assert "Classic T-Shirt" in reply
+    assert "Blue Jacket" in reply
+
+
+def test_navigate_to_umbrella_category_surfaces_subcategory_products(
+    llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    adapter = MockAdapter()
+    adapter._categories["cat-clothes"] = Category(id="cat-clothes", name="Clothes")
+    adapter._categories["cat-tshirts"].parent_id = "cat-clothes"
+    adapter._categories["cat-jackets"].parent_id = "cat-clothes"
+
+    reply = handle_turn(_ctx(adapter, llm_client, session_store), "s4d", "take me to clothes")
+
+    assert "no products in it" not in reply.lower()
+    assert "Classic T-Shirt" in reply
+    assert "Blue Jacket" in reply
+
+
 # -- Edge case: store backend unreachable during discovery (T021a, FR-016) ---- #
 
 

@@ -98,6 +98,29 @@ class TaxonomyResolver:
 
         return self._build_result(matches, snapshot)
 
+    def list_descendant_category_ids(self, category_id: str) -> list[str]:
+        """All descendant category ids (children, grandchildren, ...) of category_id, per
+        the cached snapshot's parent_id links.
+
+        Real, confirmed live bug: "show me clothes" (or "browse to clothes") found nothing
+        at all — an umbrella category like "Clothes" often has no products directly attached
+        to it, only subcategories ("Men", "Women") that hold the real products. Neither a
+        category-scoped search nor a plain keyword search on the umbrella word itself
+        (no product is literally named "clothes") ever finds them. Callers use this to widen
+        an empty umbrella-category search to include its subcategories' real products."""
+        snapshot = self._snapshot()
+        children_by_parent: dict[str, list[str]] = {}
+        for c in snapshot.categories:
+            if c.parent_id:
+                children_by_parent.setdefault(c.parent_id, []).append(c.id)
+        descendants: list[str] = []
+        frontier = [category_id]
+        while frontier:
+            children = children_by_parent.get(frontier.pop(), [])
+            descendants.extend(children)
+            frontier.extend(children)
+        return descendants
+
     def resolve_attribute_value(self, attribute_group: str, term: str) -> ResolutionResult:
         snapshot = self._snapshot()
         normalized = _normalize(term)
