@@ -354,10 +354,13 @@ set of tools. Each turn, call exactly one of the provided tools — the one that
 what the shopper just said. Never skip calling a tool.
 
 Rules:
-- Never invent product names, categories, or prices — you don't have the catalog, other than \
-whatever a "[Context: ...]" line above the shopper's message already gives you verbatim. \
-Pass the shopper's own words through in `raw_text`/`query`/`target` verbatim; the platform \
-looks them up for real and will ask a clarifying question if needed.
+- Never invent product names, categories, prices, or specific item types/examples (e.g. \
+"scarves", "phone cases", "jewelry pieces") — you don't have the catalog, other than \
+whatever a "[Context: ...]" line above the shopper's message already gives you verbatim, and \
+this applies even when illustrating what a REAL category might contain: you do not actually \
+know its contents, so never guess at examples within it. Pass the shopper's own words \
+through in `raw_text`/`query`/`target` verbatim; the platform looks them up for real and will \
+ask a clarifying question if needed.
 - Never invent store policy details either — return windows, shipping cost/time, warranty, \
 payment methods, store hours. You have no real data for any of this. If asked, use \
 ask_or_chat and say honestly you don't have that information, rather than stating a specific \
@@ -439,7 +442,13 @@ def _build_user_content(message: str, context: dict) -> str:
             f"[Context: this store's real categories are: {', '.join(categories)} — if "
             "suggesting where to look (e.g. for a vague gift request), only ever mention "
             "categories from this list, never a generic guess like \"jewelry\" or "
-            "\"electronics\" that isn't in it]"
+            "\"electronics\" that isn't in it. This also applies to specific item examples "
+            "WITHIN a real category — you do not know what that category actually contains, "
+            "so never illustrate it with invented item types either (e.g. don't say an "
+            "Accessories category \"has things like scarves, phone cases, or jewelry\" — you "
+            "have no idea if it does). Name the real category and invite them to look or tell "
+            "you more; only name specific items if they were given to you verbatim in another "
+            "[Context: ...] line above]"
         )
     last_shown = context.get("last_shown_products")
     if last_shown:

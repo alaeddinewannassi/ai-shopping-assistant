@@ -264,6 +264,31 @@ def test_groq_client_context_includes_last_shown_products_for_the_model() -> Non
     assert "Hummingbird printed t-shirt" in seen_content["user_message"]
 
 
+def test_groq_client_context_warns_against_inventing_items_within_a_real_category() -> None:
+    """Regression test for a real, confirmed live bug: given the store's real category list
+    for grounding, the LLM correctly named a real category ("Accessories") for a vague gift
+    request but then illustrated it with entirely invented item types ("scarves, phone cases,
+    jewelry pieces") — the prior fix's instruction only forbade suggesting a FAKE category,
+    never inventing fake examples within a real one. The rendered context must explicitly
+    warn against that too."""
+    seen_content = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen_content["user_message"] = body["messages"][1]["content"]
+        return _groq_response(name="ask_or_chat", arguments={"text": "Take a look at Accessories!"})
+
+    client = FreeTierHostedLLMClient(api_key="fake-key", client=_mock_client(handler))
+    action = client.parse_turn(
+        "gift for my sister, something from accessories maybe",
+        {"store_categories": ["Accessories", "Art"]},
+    )
+    assert action.action_type == "ask_or_chat"
+    content = seen_content["user_message"]
+    assert "Accessories" in content
+    assert "never illustrate it with invented item types" in content
+
+
 def test_groq_client_returns_ask_or_chat_for_a_greeting() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
