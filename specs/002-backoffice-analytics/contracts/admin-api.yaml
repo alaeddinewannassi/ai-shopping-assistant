@@ -490,8 +490,10 @@ components:
       properties:
         session_count: { type: integer }
         turn_count: { type: integer }
-        ordered_session_count: { type: integer }
-        conversion_rate: { type: number }
+        # Not ordered_session_count/conversion_rate — see FunnelMetrics.checkout_handed_off's
+        # comment below; the same "always reads 0 for a real store" problem applied here.
+        checkout_handed_off_count: { type: integer }
+        checkout_rate: { type: number }
         avg_turn_latency_ms: { type: number, nullable: true }
         p95_turn_latency_ms: { type: number, nullable: true }
         error_event_count: { type: integer }

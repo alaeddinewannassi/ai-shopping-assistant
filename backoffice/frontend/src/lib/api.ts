@@ -99,8 +99,12 @@ export interface Tenant {
 export interface OverviewMetrics {
   session_count: number;
   turn_count: number;
-  ordered_session_count: number;
-  conversion_rate: number;
+  // Not ordered_session_count/conversion_rate — real order completion happens entirely
+  // inside PrestaShop's own native checkout for every client-cart-synced tenant, a separate
+  // system this pipeline can't observe; that stat would always read 0%. Tracks the thing it
+  // CAN honestly observe: the fraction of sessions that reached checkout.
+  checkout_handed_off_count: number;
+  checkout_rate: number;
   avg_turn_latency_ms: number | null;
   p95_turn_latency_ms: number | null;
   error_event_count: number;

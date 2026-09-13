@@ -54,9 +54,9 @@ export function Overview() {
           <StatTile label="Sessions" value={data.session_count.toLocaleString()} />
           <StatTile label="Turns" value={data.turn_count.toLocaleString()} />
           <StatTile
-            label="Conversion rate"
-            value={`${(data.conversion_rate * 100).toFixed(1)}%`}
-            tone={data.conversion_rate > 0 ? "good" : "default"}
+            label="Checkout rate"
+            value={`${(data.checkout_rate * 100).toFixed(1)}%`}
+            tone={data.checkout_rate > 0 ? "good" : "default"}
           />
           <StatTile
             label="Avg turn latency"

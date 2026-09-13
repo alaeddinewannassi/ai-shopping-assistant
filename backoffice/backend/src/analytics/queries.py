@@ -38,8 +38,17 @@ _MUTATION_ACTION_TYPES = {"add_cart_item", "update_cart_item", "remove_cart_item
 class OverviewMetrics:
     session_count: int
     turn_count: int
-    ordered_session_count: int
-    conversion_rate: float  # ordered_session_count / session_count, 0.0 if no sessions
+    # NOT ordered_session_count/conversion_rate — the same real, confirmed live gap as the
+    # Funnel's old "Ordered" bar (see FunnelMetrics.checkout_handed_off's docstring): for
+    # every client-cart-synced tenant (every real PrestaShop store this project targets),
+    # checkout always hands off to PrestaShop's own native checkout, so a session outcome of
+    # "ordered" can never actually fire — a "conversion rate" stat built on it would always
+    # read 0.0%, which a merchant would reasonably (and wrongly) read as "nobody buys here."
+    # checkout_rate tracks the thing this pipeline can actually observe: real purchase
+    # intent, the fraction of sessions that reached checkout. Fully closing the loop (a
+    # truly confirmed order) needs a separate integration — not done here.
+    checkout_handed_off_count: int
+    checkout_rate: float  # checkout_handed_off_count / session_count, 0.0 if no sessions
     avg_turn_latency_ms: float | None
     p95_turn_latency_ms: float | None
     error_event_count: int
@@ -74,7 +83,7 @@ class DailyPoint:
 
 
 def get_overview(db: Session, tenant_id: uuid.UUID, start: datetime, end: datetime) -> OverviewMetrics:
-    """Overview panel: activity, conversion, latency, error rate for `[start, end)`."""
+    """Overview panel: activity, checkout rate, latency, error rate for `[start, end)`."""
     events = _events_in_range(db, tenant_id, start, end)
     session_ids = {e.session_id for e in events}
     turn_events = [e for e in events if e.intent == "turn_completed"]
@@ -82,13 +91,13 @@ def get_overview(db: Session, tenant_id: uuid.UUID, start: datetime, end: dateti
     non_turn_events = [e for e in events if e.intent != "turn_completed"]
     error_count = sum(1 for e in non_turn_events if e.outcome in _ERROR_OUTCOMES)
 
-    ordered_count = _count_sessions_with_outcome(db, tenant_id, session_ids, "ordered")
+    checkout_count = _count_sessions_with_outcome(db, tenant_id, session_ids, {"checkout", "ordered"})
 
     return OverviewMetrics(
         session_count=len(session_ids),
         turn_count=len(turn_events),
-        ordered_session_count=ordered_count,
-        conversion_rate=(ordered_count / len(session_ids)) if session_ids else 0.0,
+        checkout_handed_off_count=checkout_count,
+        checkout_rate=(checkout_count / len(session_ids)) if session_ids else 0.0,
         avg_turn_latency_ms=(sum(latencies) / len(latencies)) if latencies else None,
         p95_turn_latency_ms=_percentile(latencies, 0.95) if latencies else None,
         error_event_count=error_count,
@@ -125,7 +134,7 @@ def get_funnel(db: Session, tenant_id: uuid.UUID, start: datetime, end: datetime
                 if (e.details or {}).get("action_type") in _MUTATION_ACTION_TYPES:
                     cart_mutated.add(session_id)
 
-    checkout_handed_off = _count_sessions_with_outcome(db, tenant_id, set(by_session), "checkout")
+    checkout_handed_off = _count_sessions_with_outcome(db, tenant_id, set(by_session), {"checkout", "ordered"})
 
     return FunnelMetrics(
         sessions=len(by_session),
@@ -193,17 +202,23 @@ def _events_in_range(
 
 
 def _count_sessions_with_outcome(
-    db: Session, tenant_id: uuid.UUID, session_ids: set[str], outcome: str
+    db: Session, tenant_id: uuid.UUID, session_ids: set[str], outcomes: str | set[str]
 ) -> int:
+    """`outcomes` is usually a single string, but "reached checkout" must also count a
+    session that went all the way to "ordered" — outcome only ever ranks upward
+    (upsert_turn), so "ordered" implies checkout was reached too, even though the stored
+    value itself no longer says "checkout" once it's moved past it. Pass a set to count
+    "reached at least one of these" rather than an exact match."""
     if not session_ids:
         return 0
+    wanted = {outcomes} if isinstance(outcomes, str) else outcomes
     stmt = (
         sa.select(sa.func.count())
         .select_from(ConversationSessionRecord)
         .where(
             ConversationSessionRecord.tenant_id == tenant_id,
             ConversationSessionRecord.session_id.in_(session_ids),
-            ConversationSessionRecord.outcome == outcome,
+            ConversationSessionRecord.outcome.in_(wanted),
         )
     )
     return db.scalar(stmt) or 0

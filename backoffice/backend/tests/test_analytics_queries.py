@@ -133,15 +133,17 @@ def test_overview_and_funnel_numbers_match_hand_computed_expectations(db) -> Non
     assert funnel.confirmed == 1  # only s1 confirmed anything
     assert funnel.cart_mutated == 1  # s1's add_cart_item confirm
     assert funnel.checkout_proposed == 1  # only s1 proposed checkout
-    assert funnel.checkout_handed_off == 1  # only s3, distinct from s1's "ordered"
+    # s1 ("ordered") AND s3 ("checkout") — reaching "ordered" implies checkout was reached
+    # too, even though the stored outcome itself has since moved past that value.
+    assert funnel.checkout_handed_off == 2
 
     overview = get_overview(db, tenant_id, start, end)
     assert overview.session_count == 3
     # 3 turns in s1 (search, add-to-cart, checkout) + 3 in s3 (search, add-to-cart-attempt,
     # llm_call failure) + 1 in s2
     assert overview.turn_count == 7
-    assert overview.ordered_session_count == 1
-    assert overview.conversion_rate == pytest.approx(1 / 3)
+    assert overview.checkout_handed_off_count == 2  # s1 ("ordered") and s3 ("checkout")
+    assert overview.checkout_rate == pytest.approx(2 / 3)
     assert overview.avg_turn_latency_ms == pytest.approx((100 + 200 + 300 + 50 + 150 + 75 + 25) / 7)
     # s3's "unavailable" search AND its "error" llm_call — a real, confirmed live gap: the
     # latter used to be invisible to error_rate entirely (see _ERROR_OUTCOMES's docstring).
@@ -222,6 +224,6 @@ def test_empty_range_returns_zeroed_metrics_not_a_crash(db) -> None:
 
     overview = get_overview(db, tenant_id, start, end)
     assert overview.session_count == 0
-    assert overview.conversion_rate == 0.0
+    assert overview.checkout_rate == 0.0
     assert overview.avg_turn_latency_ms is None
     assert overview.error_rate == 0.0
