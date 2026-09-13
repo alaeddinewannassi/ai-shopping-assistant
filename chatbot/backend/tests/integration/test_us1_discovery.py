@@ -340,6 +340,27 @@ def test_llm_context_includes_the_stores_real_faq_content(
     ]
 
 
+def test_llm_context_omits_store_faqs_for_a_message_unrelated_to_policy(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    """Regression test for a real, confirmed live gap: store_faqs used to be attached on
+    EVERY turn regardless of what was asked — a bare "Yo" paid the same token cost as a
+    genuine policy question, since it's background grounding data the LLM never opts into.
+    A single greeting immediately followed by a fully unrelated question ("I want a jacket")
+    was enough to exhaust the free tier's per-minute token bucket and rate-limit both. Only a
+    message that's plausibly asking about policy should carry this context at all."""
+    adapter.set_faqs([FaqEntry(question="Delivery", answer="Packages ship within 2 days via UPS.")])
+    spy = _ContextCapturingLLMClient(
+        ActionCall(action_type="ask_or_chat", parameters={"text": "Hi there!"})
+    )
+    ctx = _ctx(adapter, spy, session_store)
+
+    handle_turn(ctx, "s9e", "Yo")
+
+    assert spy.last_context is not None
+    assert "store_faqs" not in spy.last_context
+
+
 def test_llm_context_omits_store_faqs_when_the_store_has_none_configured(
     adapter: MockAdapter, session_store: SessionStore
 ) -> None:

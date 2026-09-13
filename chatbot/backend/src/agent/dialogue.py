@@ -1197,7 +1197,19 @@ def handle_turn(
         return reply
 
 
-def _build_llm_context(session: ConversationSession, ctx: DialogueContext) -> dict:
+_FAQ_RELEVANT_KEYWORDS = (
+    "delivery", "shipping", "ship", "return", "refund", "exchange", "warranty", "guarantee",
+    "payment", "pay", "card", "secure", "faq", "help", "contact", "hours", "policy",
+    "carrier", "track", "login", "log in", "account",
+)
+
+
+def _message_asks_about_policy(message: str) -> bool:
+    text_lower = message.lower()
+    return any(kw in text_lower for kw in _FAQ_RELEVANT_KEYWORDS)
+
+
+def _build_llm_context(session: ConversationSession, ctx: DialogueContext, message: str) -> dict:
     """Context passed to LLMClient.parse_turn() — additive only, RuleBasedStubClient
     ignores it entirely. `pending_action` lets a real model correctly route "yes"/"actually,
     cancel that" against what's actually pending, rather than guessing from bare keywords."""
@@ -1214,18 +1226,25 @@ def _build_llm_context(session: ConversationSession, ctx: DialogueContext) -> di
         categories = []
     if categories:
         context["store_categories"] = categories
-    try:
-        # Real, confirmed live gap: policy questions (shipping, returns, login, warranty,
-        # store hours) always got a blanket "I don't have that information" even when the
-        # store had real, admin-authored content for exactly that question — grounding data
-        # so the LLM can answer honestly from it instead. Same best-effort degradation as
-        # categories above: a store with none configured (or without webservice permission
-        # for it yet) must not break every single turn.
-        faqs = ctx.discovery_handler.list_faqs()
-    except AdapterUnavailableError:
-        faqs = []
-    if faqs:
-        context["store_faqs"] = [{"question": f.question, "answer": f.answer} for f in faqs]
+    # Real, confirmed live gap: this used to be fetched and attached on EVERY turn
+    # regardless of what was asked — a bare "Yo" paid the same token cost as a genuine
+    # policy question, since it's background grounding data, not something the LLM opts
+    # into. Only worth that cost when the message is plausibly asking about one; a
+    # completely unrelated message ("I want a jacket") should never carry it at all.
+    if _message_asks_about_policy(message):
+        try:
+            # Real, confirmed live gap: policy questions (shipping, returns, login,
+            # warranty, store hours) always got a blanket "I don't have that information"
+            # even when the store had real, admin-authored content for exactly that
+            # question — grounding data so the LLM can answer honestly from it instead.
+            # Same best-effort degradation as categories above: a store with none
+            # configured (or without webservice permission for it yet) must not break
+            # every single turn.
+            faqs = ctx.discovery_handler.list_faqs()
+        except AdapterUnavailableError:
+            faqs = []
+        if faqs:
+            context["store_faqs"] = [{"question": f.question, "answer": f.answer} for f in faqs]
     if session.last_shown_products:
         context["last_shown_products"] = session.last_shown_products
     if session.pending_action is not None:
@@ -1283,7 +1302,7 @@ def _route_turn(
         action = ActionCall(action_type="view_cart", parameters={})
     else:
         action = ctx.llm_client.parse_turn(
-            message, context=_build_llm_context(session, ctx), session_id=session_id
+            message, context=_build_llm_context(session, ctx, message), session_id=session_id
         )
 
     # Populated by the branches below, then written onto the session at the very end so
