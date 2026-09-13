@@ -12,13 +12,60 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+// Real, confirmed live bug: the access-token cookie expires after 15 minutes
+// (backend/src/auth/tokens.py's _ACCESS_TOKEN_TTL) — a real POST /auth/refresh endpoint
+// exists to mint a new one from the 30-day refresh token, but nothing here ever called it.
+// Every single request just threw its 401 straight up, so any backoffice tab left open (or
+// any admin doing more than 15 minutes of work) suddenly saw "Failed to load overview" on
+// every page, with no indication why and no way to recover short of manually reloading (a
+// reload happens to work today, invisibly, only because a fresh AuthProvider mount re-runs
+// api.me() — the same 401, undiscoverably).
+//
+// Fixed with a standard silent refresh-and-retry: a 401 from anything other than the auth
+// endpoints themselves triggers ONE /auth/refresh call, then retries the original request
+// once. Concurrent 401s (Overview fires its overview/timeseries queries together) share one
+// in-flight refresh via `refreshPromise` rather than each racing their own. If the refresh
+// itself fails (the refresh token is ALSO expired/invalid — a genuinely dead session, not
+// just an old access token), `onSessionExpired` lets AuthProvider clear its user state so
+// the app actually shows the login page instead of a stuck, confusing error screen forever.
+let refreshPromise: Promise<void> | null = null;
+let onSessionExpired: (() => void) | null = null;
+
+export function setSessionExpiredHandler(handler: () => void): void {
+  onSessionExpired = handler;
+}
+
+function refreshAccessToken(): Promise<void> {
+  if (!refreshPromise) {
+    refreshPromise = fetch(`${API_BASE}/auth/refresh`, { method: "POST", credentials: "include" })
+      .then((resp) => {
+        if (!resp.ok) throw new ApiError(resp.status, "Session refresh failed");
+      })
+      .finally(() => {
+        refreshPromise = null;
+      });
+  }
+  return refreshPromise;
+}
+
+const _NO_RETRY_PATHS = new Set(["/auth/login", "/auth/refresh"]);
+
+async function request<T>(path: string, init?: RequestInit, _isRetry = false): Promise<T> {
   const resp = await fetch(`${API_BASE}${path}`, {
     ...init,
     credentials: "include",
     headers: { "Content-Type": "application/json", ...init?.headers },
   });
   if (resp.status === 204) return undefined as T;
+  if (resp.status === 401 && !_isRetry && !_NO_RETRY_PATHS.has(path)) {
+    try {
+      await refreshAccessToken();
+      return await request<T>(path, init, true);
+    } catch {
+      onSessionExpired?.();
+      // Falls through to the original 401 handling below.
+    }
+  }
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({ detail: resp.statusText }));
     throw new ApiError(resp.status, body.detail ?? resp.statusText);

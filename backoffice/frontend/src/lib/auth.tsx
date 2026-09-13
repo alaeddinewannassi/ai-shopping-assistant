@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
-import { api, type AdminUser } from "./api";
+import { api, setSessionExpiredHandler, type AdminUser } from "./api";
 
 interface AuthState {
   user: AdminUser | null;
@@ -20,6 +20,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .then(setUser)
       .catch(() => setUser(null))
       .finally(() => setLoading(false));
+  }, []);
+
+  // A definitively dead session (the refresh token is also expired/invalid, not just the
+  // 15-minute access token) — api.ts's request() calls this after its own silent
+  // refresh-and-retry fails, so ProtectedShell's `!user` check redirects to /login instead
+  // of leaving every page stuck on "Failed to load X" forever.
+  useEffect(() => {
+    setSessionExpiredHandler(() => setUser(null));
   }, []);
 
   const login = useCallback(async (email: string, password: string) => {
