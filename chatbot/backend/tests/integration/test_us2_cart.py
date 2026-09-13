@@ -345,6 +345,33 @@ def test_hyphenless_product_name_correctly_narrows_to_one_match(adapter: MockAda
     assert resolution.product.name == "Classic T-Shirt"
 
 
+def test_add_to_cart_falls_back_to_the_page_the_shopper_is_literally_on(
+    adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
+) -> None:
+    """Regression test for a real, confirmed live bug: standing right on a specific product's
+    real storefront page and saying "add this shirt jacket to my cart" (a generic reference
+    that OR-matches two unrelated catalog products — Classic T-Shirt via "shirt", Blue Jacket
+    via "jacket" — the same ambiguity-trigger shape as
+    test_get_product_details_falls_back_to_the_page_the_shopper_is_literally_on) surfaced an
+    unrelated "did you mean: Classic T-Shirt, Blue Jacket?" clarifying question instead of
+    just adding the exact item the shopper was plainly already looking at.
+    get_product_details already had this current_product_id fallback (resolve_product_details);
+    resolve_add_to_cart never received current_product_id at all, so the exact same class of
+    bug that was already fixed for read-only product questions was still live for the actual
+    add-to-cart action."""
+    ctx = _ctx(adapter, llm_client, session_store)
+
+    reply = handle_turn(
+        ctx, "u16", "add this shirt jacket to my cart", current_product_id="prod-tshirt-1"
+    )
+
+    # Resolved to the product on the current page — never the wrong OR-matched sibling, and
+    # never a product-level "did you mean" clarifying question. Classic T-Shirt itself has
+    # two variants, so a variant-level follow-up question is still correct here.
+    assert "Blue Jacket" not in reply
+    assert "Classic T-Shirt" in reply
+
+
 def test_cart_action_marks_the_turn_as_cart_link_worthy(
     adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
 ) -> None:

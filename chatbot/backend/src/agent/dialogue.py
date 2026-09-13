@@ -402,12 +402,19 @@ def _bare_confirmation_add_override(session: ConversationSession, message: str) 
 
 
 def _handle_propose_add_to_cart(
-    ctx: DialogueContext, session_id: str, raw_text: str, last_shown_ids: list[str]
+    ctx: DialogueContext,
+    session_id: str,
+    raw_text: str,
+    last_shown_ids: list[str],
+    current_product_id: str | None = None,
 ) -> str:
     assert ctx.cart_handler is not None and ctx.pending_gate is not None
     session = ctx.session_store.get_or_create(session_id)
     resolution = ctx.cart_handler.resolve_add_to_cart(
-        raw_text, last_shown_ids, pending_variant_product_id=session.pending_variant_product_id
+        raw_text,
+        last_shown_ids,
+        pending_variant_product_id=session.pending_variant_product_id,
+        current_product_id=current_product_id,
     )
 
     def _clear_pending_variant() -> None:
@@ -1186,7 +1193,11 @@ def _route_turn(
                 else session.last_shown_product_ids
             )
             reply = _handle_propose_add_to_cart(
-                ctx, session_id, action.parameters.get("raw_text", message), reference_ids
+                ctx,
+                session_id,
+                action.parameters.get("raw_text", message),
+                reference_ids,
+                current_product_id=current_product_id,
             )
 
     elif action.action_type == "propose_update_cart" and ctx.cart_handler and ctx.pending_gate:

@@ -538,6 +538,7 @@ class CartIntentHandler:
         raw_text: str,
         last_shown_ids: list[str] | None = None,
         pending_variant_product_id: str | None = None,
+        current_product_id: str | None = None,
     ) -> CartResolution:
         """US2 Scenario 1 (resolve what to add) + Scenario 5 (out-of-stock).
 
@@ -545,6 +546,18 @@ class CartIntentHandler:
         this shopper was just shown) lets a bare pronoun ("add it") or ordinal ("the second
         one") resolve against that instead of falling through to a fresh keyword search that
         has no idea what "it" refers to.
+
+        `current_product_id` (widget-read from window.prestashop.page — the product page the
+        shopper is LITERALLY looking at right now) is the same last-resort fallback already
+        used by DiscoveryIntentHandler.resolve_product_details. Real, confirmed live bug:
+        standing right on a specific product's page and saying "add this shirt jacket to my
+        cart" (a generic reference that OR-matches two unrelated products) got an unrelated
+        "did you mean: Classic T-Shirt, Blue Jacket?" clarifying question instead of just
+        adding the item the shopper was plainly already looking at — the read-only product-
+        details path already had this fallback, but the actual add-to-cart action never did.
+        Only used when normal resolution couldn't cleanly identify one product — an
+        unambiguous keyword/pronoun match always wins, since the shopper may be adding
+        something other than the page they happen to be on.
 
         `pending_variant_product_id` (session.pending_variant_product_id) is the product this
         shopper was JUST asked "which size/color did you mean?" about. Real, confirmed live
@@ -573,6 +586,17 @@ class CartIntentHandler:
         except AdapterUnavailableError as exc:
             _log_unavailable(f"add_to_cart:{raw_text}", exc)
             return CartResolution(kind=CartResolutionKind.UNAVAILABLE)
+
+        if product is None and current_product_id is not None:
+            try:
+                current_product = self._adapter.get_product(current_product_id)
+            except AdapterUnavailableError as exc:
+                _log_unavailable(f"add_to_cart:{raw_text}", exc)
+                return CartResolution(kind=CartResolutionKind.UNAVAILABLE)
+            except ProductNotFoundError:
+                current_product = None
+            if current_product is not None:
+                product = current_product
 
         if product is None:
             if candidates:
