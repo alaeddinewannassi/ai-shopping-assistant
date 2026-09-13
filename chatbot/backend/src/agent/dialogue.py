@@ -33,6 +33,7 @@ from src.agent.intents import (
     PromoIntentHandler,
     PromoResolutionKind,
     _clean_reference_term,
+    _value_mentioned,
 )
 from src.agent.llm_client import ActionCall, LLMClient
 from src.agent.pending import PendingActionError, PendingActionGate
@@ -444,6 +445,35 @@ def _pending_product_clarify_override(session: ConversationSession, message: str
     )
 
 
+def _pending_variant_answer_override(session: ConversationSession, message: str) -> bool:
+    """True when this turn should be routed straight to propose_add_to_cart without asking
+    the LLM: an AMBIGUOUS_VARIANT clarifying question ("which option of Hummingbird printed
+    sweater did you mean — size: S, size: M, size: L, size: XL?") is still open, and this
+    message mentions one of that product's real attribute values.
+
+    Real, confirmed live bug (a full adversarial conversation transcript): a real hosted LLM
+    very frequently misclassified a reply naming a real size/color as search_products or
+    navigate_to instead of continuing the add-to-cart flow — "size S", "S", "ADD SWEATER
+    SIZE S" all got treated as fresh, unrelated queries. One manifestation was especially
+    bad: a bare "M" (meant as "size M") got routed to category search and matched "Home",
+    "Men", "Women", and "Home Accessories" (all literally contain the letter "m") — the
+    exact substring-collision failure mode fixed for category resolution earlier, now
+    showing up one layer up in intent classification instead. Combined with a bare "yes"
+    correctly but unhelpfully re-asking the same question (it carries no size info to
+    resolve anything with — see _bare_confirmation_add_override's own handling of that
+    case), the shopper was stuck unable to ever actually answer the question.
+
+    Deliberately does NOT require the message to be short/bare — "ADD SWEATER SIZE S" must
+    match too, since the LLM's own unreliability is exactly what's being bypassed here, not
+    just its handling of terse replies. A genuine pending yes/no always wins (checked first)."""
+    if session.pending_action is not None or session.pending_variant_product_id is None:
+        return False
+    if not session.pending_variant_attribute_values:
+        return False
+    text_lower = message.lower()
+    return any(_value_mentioned(value, text_lower) for value in session.pending_variant_attribute_values)
+
+
 def _handle_propose_add_to_cart(
     ctx: DialogueContext,
     session_id: str,
@@ -464,6 +494,7 @@ def _handle_propose_add_to_cart(
         if session.pending_variant_product_id is not None:
             session.pending_variant_product_id = None
             session.pending_variant_product_name = ""
+            session.pending_variant_attribute_values = []
             ctx.session_store.save(session)
 
     def _clear_pending_product_clarify() -> None:
@@ -512,6 +543,12 @@ def _handle_propose_add_to_cart(
         _clear_pending_product_clarify()
         session.pending_variant_product_id = resolution.product.id
         session.pending_variant_product_name = resolution.product.name
+        # See ConversationSession.pending_variant_attribute_values's docstring — lets
+        # _pending_variant_answer_override recognize a real size/color mentioned in a later
+        # turn without needing another catalog call or the LLM's cooperation.
+        session.pending_variant_attribute_values = sorted(
+            {value for variant in resolution.product.variants for value in variant.attributes.values()}
+        )
         ctx.session_store.save(session)
         return (
             f"Which option of {resolution.product.name} did you mean — "
@@ -1219,6 +1256,9 @@ def _route_turn(
     elif pending_quantity_override is not None and ctx.cart_handler and ctx.pending_gate:
         # Deterministic fast path — see _pending_add_quantity_override's docstring. The LLM
         # is never even asked to classify this turn: there's nothing for it to judge.
+        action = ActionCall(action_type="propose_add_to_cart", parameters={"raw_text": message})
+    elif ctx.cart_handler and ctx.pending_gate and _pending_variant_answer_override(session, message):
+        # Deterministic fast path — see _pending_variant_answer_override's docstring.
         action = ActionCall(action_type="propose_add_to_cart", parameters={"raw_text": message})
     elif ctx.cart_handler and ctx.pending_gate and _bare_confirmation_add_override(session, message):
         # Deterministic fast path — see _bare_confirmation_add_override's docstring.

@@ -496,6 +496,48 @@ def test_naming_an_ambiguous_candidate_without_the_word_add_still_continues_the_
     assert session.pending_action.action_type == "add_cart_item"
 
 
+def test_naming_a_pending_variant_answer_still_resolves_it_even_when_the_llm_misroutes_it(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    """Regression test for a real, confirmed live bug (a full adversarial conversation
+    transcript): after an AMBIGUOUS_VARIANT clarifying question ("which option ... did you
+    mean: size: S, size: M, size: L, size: XL?"), a real hosted LLM very frequently
+    misclassified a reply naming a real size/color as search_products or navigate_to instead
+    of continuing the add-to-cart flow — "size S", "S", "ADD SWEATER SIZE S" all got treated
+    as fresh, unrelated queries, and a bare "M" was even routed to CATEGORY search, matching
+    "Home"/"Men"/"Women"/"Home Accessories" (all literally contain the letter "m"). The
+    shopper was stuck unable to ever actually answer the question. _AlwaysSearchLLMClient
+    always misroutes regardless of input or context (including the pending_variant_product
+    hint _build_llm_context already provides) — the same failure mode observed live — which
+    makes it the right stand-in: the fix must intercept BEFORE the LLM is ever asked."""
+    ctx = _ctx(adapter, _AlwaysSearchLLMClient(), session_store)
+
+    # Blue Jacket has two variants sharing color=Blue, differing only by size (M in stock,
+    # L out of stock) — "blue" alone doesn't narrow to one, so this is a genuine
+    # AMBIGUOUS_VARIANT case. Resolved directly through the cart handler (bypassing the
+    # always-wrong LLM, which isn't what this test is about) and its session fields set the
+    # exact way _handle_propose_add_to_cart's AMBIGUOUS_VARIANT branch does, to isolate what
+    # the override under test actually needs: an open pending_variant question.
+    resolution = ctx.cart_handler.resolve_add_to_cart("add the blue jacket to my cart")
+    assert resolution.kind == CartResolutionKind.AMBIGUOUS_VARIANT
+    session = session_store.get_or_create("u23")
+    session.pending_variant_product_id = resolution.product.id
+    session.pending_variant_product_name = resolution.product.name
+    session.pending_variant_attribute_values = sorted(
+        {v for variant in resolution.product.variants for v in variant.attributes.values()}
+    )
+    session_store.save(session)
+
+    # The LLM always misroutes this to search_products, ignoring the pending_variant_product
+    # context it's handed — the exact failure mode observed live.
+    second = handle_turn(ctx, "u23", "size L")
+
+    assert "which option" not in second.lower()
+    assert "out of stock" in second.lower()  # correctly resolved to the (out-of-stock) L variant
+    session = session_store.get_or_create("u23")
+    assert session.pending_variant_product_id is None  # resolved, no longer stuck open
+
+
 def test_cart_action_marks_the_turn_as_cart_link_worthy(
     adapter: MockAdapter, llm_client: RuleBasedStubClient, session_store: SessionStore
 ) -> None:

@@ -91,6 +91,21 @@ class ConversationSession:
     # last searched (which could be a stale, unrelated discovery result).
     pending_variant_product_id: str | None = None
     pending_variant_product_name: str = ""
+    # Real, confirmed live bug (a full adversarial conversation transcript): a real hosted
+    # LLM very frequently misclassified a bare or noisy reply naming a real size/color
+    # ("size S", "S", "M", "ADD SWEATER SIZE S") as search_products/navigate_to instead of
+    # continuing the add-to-cart flow — one specific manifestation, a bare "M" meant as
+    # "size M", got routed to category search and matched "Home"/"Men"/"Women"/"Home
+    # Accessories" (all literally contain the letter "m"). Combined with a bare "yes"
+    # correctly but unhelpfully re-asking the same question (it carries no size info to
+    # resolve with), the shopper was stuck in a loop unable to ever answer the question at
+    # all. The real attribute VALUES of the pending product (e.g. ["S","M","L","XL"]),
+    # captured once when the question is asked, let a deterministic override
+    # (dialogue.py's _pending_variant_answer_override) route any later reply mentioning one
+    # of them straight back to propose_add_to_cart — bypassing the LLM's classification
+    # entirely for this narrow, high-stakes case, the same posture as every other bare-reply
+    # override in this module.
+    pending_variant_attribute_values: list[str] = field(default_factory=list)
     # Real, confirmed live bug: after an AMBIGUOUS_PRODUCT clarifying question ("did you
     # mean: Mountain fox notebook, Brown bear notebook, Hummingbird notebook?"), a real
     # hosted LLM inconsistently classified the shopper's answer ("brown bear one", "the
@@ -244,6 +259,7 @@ class SessionStore:
                 last_turn_needs_confirmation=data.get("last_turn_needs_confirmation", False),
                 pending_variant_product_id=data.get("pending_variant_product_id"),
                 pending_variant_product_name=data.get("pending_variant_product_name", ""),
+                pending_variant_attribute_values=data.get("pending_variant_attribute_values", []),
                 pending_product_clarify_ids=data.get("pending_product_clarify_ids", []),
                 pending_product_clarify_names=data.get("pending_product_clarify_names", []),
                 pending_action=PendingAction(**pending) if pending else None,
