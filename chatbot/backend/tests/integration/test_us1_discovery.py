@@ -14,7 +14,7 @@ from src.agent.intents import DiscoveryIntentHandler
 from src.agent.llm_client import ActionCall, RuleBasedStubClient
 from src.agent.taxonomy_resolver import TaxonomyResolver
 from src.session.catalog_cache import CatalogSnapshotCache
-from src.session.store import SessionStore
+from src.session.store import PendingAction, SessionStore
 
 
 @pytest.fixture
@@ -318,26 +318,78 @@ def test_llm_context_includes_the_stores_real_categories(
     assert set(spy.last_context.get("store_categories", [])) == {"T-Shirts", "Jackets"}
 
 
-def test_llm_context_includes_the_stores_real_faq_content(
+def test_a_clear_faq_match_is_answered_directly_without_ever_calling_the_llm(
     adapter: MockAdapter, session_store: SessionStore
 ) -> None:
-    """Regression test for a real gap found reviewing the assistant's own tool definitions:
-    a shopper asking about shipping/returns/login always got a blanket "I don't have that
-    information" even when the store had real, admin-authored content for exactly that
-    question (PrestaShop's own CMS pages, read live via PrestaShopAdapter.list_faqs) — this
-    grounds the LLM in that real content instead."""
+    """Regression test for a real, confirmed live gap: the system prompt + tool schema alone
+    cost ~2500-3000 tokens on EVERY parse_turn call, before any per-turn context was even
+    added — Groq's free tier caps at 8000 tokens/minute, so as few as 2-3 turns exhausted it
+    regardless of what was asked, confirmed live even on a brand-new API key. Shrinking the
+    FAQ context itself (list_faqs's own title-keyword filter, _build_llm_context's
+    per-message gating) wasn't enough, because that overhead was never the dominant cost. A
+    policy question with one clear, unambiguous FAQ match is now answered directly from real
+    store content instead — no LLM call at all, so it costs nothing and can't be misrouted to
+    search_products under load."""
     adapter.set_faqs([FaqEntry(question="Delivery", answer="Packages ship within 2 days via UPS.")])
+    spy = _ContextCapturingLLMClient(
+        ActionCall(action_type="ask_or_chat", parameters={"text": "should never be reached"})
+    )
+    ctx = _ctx(adapter, spy, session_store)
+
+    reply = handle_turn(ctx, "s9c", "how long does shipping take?")
+
+    assert reply == "Packages ship within 2 days via UPS."
+    assert spy.last_context is None  # the LLM was never even called
+
+
+def test_an_ambiguous_faq_match_still_falls_through_to_the_llm_with_grounding(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    """Two entries about the same topic can't be picked between deterministically — safer to
+    leave it to the LLM's judgment (still grounded in both real answers via
+    _build_llm_context) than guess wrong."""
+    adapter.set_faqs(
+        [
+            FaqEntry(question="Delivery", answer="Packages ship within 2 days via UPS."),
+            FaqEntry(question="International shipping", answer="We ship worldwide via DHL."),
+        ]
+    )
     spy = _ContextCapturingLLMClient(
         ActionCall(action_type="ask_or_chat", parameters={"text": "Let me check that for you."})
     )
     ctx = _ctx(adapter, spy, session_store)
 
-    handle_turn(ctx, "s9c", "how long does shipping take?")
+    handle_turn(ctx, "s9f", "how long does shipping take?")
 
     assert spy.last_context is not None
-    assert spy.last_context.get("store_faqs") == [
-        {"question": "Delivery", "answer": "Packages ship within 2 days via UPS."}
-    ]
+    assert len(spy.last_context.get("store_faqs", [])) == 2
+
+
+def test_faq_override_never_fires_while_a_pending_action_awaits_confirmation(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    """A shopper answering a pending confirmation with something that happens to contain a
+    policy word ("yes, but what about shipping?") must not have it silently hijacked into a
+    deterministic FAQ answer that drops the pending state — the LLM's full context (which
+    still sees the pending action) handles this combined case instead."""
+    adapter.set_faqs([FaqEntry(question="Delivery", answer="Packages ship within 2 days via UPS.")])
+    spy = _ContextCapturingLLMClient(
+        ActionCall(action_type="ask_or_chat", parameters={"text": "Let me check that for you."})
+    )
+    ctx = _ctx(adapter, spy, session_store)
+    session = session_store.get_or_create("s9h")
+    session.pending_action = PendingAction(
+        action_id="pending-1",
+        action_type="add_cart_item",
+        parameters={},
+        recap_text="Add 1 item?",
+        created_at=0.0,
+    )
+    session_store.save(session)
+
+    handle_turn(ctx, "s9h", "yes, but what about shipping?")
+
+    assert spy.last_context is not None  # reached the LLM, not the deterministic FAQ override
 
 
 def test_llm_context_omits_store_faqs_for_a_message_unrelated_to_policy(

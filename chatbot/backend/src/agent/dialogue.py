@@ -1197,16 +1197,69 @@ def handle_turn(
         return reply
 
 
-_FAQ_RELEVANT_KEYWORDS = (
-    "delivery", "shipping", "ship", "return", "refund", "exchange", "warranty", "guarantee",
-    "payment", "pay", "card", "secure", "faq", "help", "contact", "hours", "policy",
-    "carrier", "track", "login", "log in", "account",
+# Grouped (not flat) so a shopper's own wording ("shipping") and a CMS page's own title
+# ("Delivery") can be recognized as the SAME topic even though they share no literal word —
+# same idea as taxonomy_cache.py's DEFAULT_SYNONYM_TABLE for category names, applied to
+# policy topics instead. _faq_answer_override below relies on this grouping to pick which
+# specific FAQ entry a message is about, not just whether it's policy-related at all.
+_FAQ_TOPIC_GROUPS: tuple[frozenset[str], ...] = (
+    frozenset({"delivery", "shipping", "ship", "carrier", "track", "deliver"}),
+    frozenset({"payment", "pay", "card", "secure", "checkout"}),
+    frozenset({"return", "refund", "exchange"}),
+    frozenset({"warranty", "guarantee"}),
+    frozenset({"login", "log in", "account"}),
+    frozenset({"faq", "help", "contact", "hours", "policy", "support"}),
 )
+_FAQ_RELEVANT_KEYWORDS = tuple(kw for group in _FAQ_TOPIC_GROUPS for kw in group)
 
 
 def _message_asks_about_policy(message: str) -> bool:
     text_lower = message.lower()
     return any(kw in text_lower for kw in _FAQ_RELEVANT_KEYWORDS)
+
+
+def _faq_topic_groups_for(text: str) -> set[int]:
+    text_lower = text.lower()
+    return {i for i, group in enumerate(_FAQ_TOPIC_GROUPS) if any(kw in text_lower for kw in group)}
+
+
+def _faq_answer_override(ctx: DialogueContext, message: str) -> str | None:
+    """Deterministic fast path for a clear policy/FAQ question — answers directly from the
+    store's real FAQ content without ever calling the LLM, the same pattern already used
+    elsewhere for a narrow, well-defined case (see e.g. _pending_variant_answer_override).
+
+    Real, confirmed live gap: the system prompt + tool schema alone cost ~2500-3000 tokens on
+    EVERY parse_turn call, before any per-turn context is even added — Groq's free tier caps
+    at 8000 tokens/minute, so as few as 2-3 turns exhaust it regardless of what's actually
+    asked, confirmed live even on a brand-new API key. Shrinking the FAQ context further
+    wasn't enough (see _build_llm_context/list_faqs's own history) because that overhead was
+    never the dominant cost. A policy question with one clear, unambiguous FAQ match doesn't
+    need the LLM's classification at all: answering it directly is both free (no API call at
+    all) and more reliable (no risk of paraphrasing past the real content or misrouting to
+    search_products under load).
+
+    Returns None — falls through to the normal LLM path, itself still gated on
+    _message_asks_about_policy — whenever the store has no FAQ content, or the message
+    doesn't clearly match exactly one entry; an ambiguous or novel phrasing is safer left to
+    the LLM's judgment than a wrong deterministic guess."""
+    message_groups = _faq_topic_groups_for(message)
+    if not message_groups:
+        return None
+    try:
+        faqs = ctx.discovery_handler.list_faqs()
+    except AdapterUnavailableError:
+        return None
+    scored = [
+        (len(_faq_topic_groups_for(faq.question) & message_groups), faq)
+        for faq in faqs
+    ]
+    scored = [pair for pair in scored if pair[0] > 0]
+    if not scored:
+        return None
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    if len(scored) > 1 and scored[1][0] == scored[0][0]:
+        return None  # ambiguous — don't guess, leave it to the LLM's judgment instead
+    return scored[0][1].answer
 
 
 def _build_llm_context(session: ConversationSession, ctx: DialogueContext, message: str) -> dict:
@@ -1280,6 +1333,11 @@ def _route_turn(
 
     bare_confirm_decline = _bare_confirm_or_decline_override(session, message)
     pending_quantity_override = _pending_add_quantity_override(session, message)
+    # Only attempted with no pending action in play — a shopper answering a pending
+    # confirmation/clarification with something that happens to contain a policy word
+    # ("yes, but what about shipping?") is safer left to the LLM's full context than
+    # short-circuited into an FAQ answer that silently drops the pending state.
+    faq_answer = _faq_answer_override(ctx, message) if session.pending_action is None else None
     if bare_confirm_decline is not None and ctx.pending_gate:
         # Deterministic fast path — see _bare_confirm_or_decline_override's docstring. Takes
         # priority over every other override below: a genuine pending yes/no always wins.
@@ -1300,6 +1358,10 @@ def _route_turn(
     elif ctx.pending_gate and _bare_view_cart_override(session, message):
         # Deterministic fast path — see _bare_view_cart_override's docstring.
         action = ActionCall(action_type="view_cart", parameters={})
+    elif faq_answer is not None:
+        # Deterministic fast path — see _faq_answer_override's docstring. Never calls the
+        # LLM at all: a clear, unambiguous FAQ match is answered directly from real content.
+        action = ActionCall(action_type="ask_or_chat", parameters={"text": faq_answer})
     else:
         action = ctx.llm_client.parse_turn(
             message, context=_build_llm_context(session, ctx, message), session_id=session_id
