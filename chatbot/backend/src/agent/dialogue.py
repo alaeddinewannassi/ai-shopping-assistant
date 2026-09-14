@@ -1204,7 +1204,12 @@ def handle_turn(
 # specific FAQ entry a message is about, not just whether it's policy-related at all.
 _FAQ_TOPIC_GROUPS: tuple[frozenset[str], ...] = (
     frozenset({"delivery", "shipping", "ship", "carrier", "track", "deliver"}),
-    frozenset({"payment", "pay", "card", "secure", "checkout"}),
+    # NOT "checkout" — real, confirmed live bug: it collides with the actual checkout
+    # intent ("ok let's checkout" got hijacked into the Secure payment FAQ instead of
+    # request_checkout, since that page's own title contains "payment"/"secure" and
+    # "checkout" scored an overlap). "payment"/"pay"/"card"/"secure" already identify a
+    # genuine payment-METHOD question without needing an action-vocabulary word.
+    frozenset({"payment", "pay", "card", "secure"}),
     frozenset({"return", "refund", "exchange"}),
     frozenset({"warranty", "guarantee"}),
     frozenset({"login", "log in", "account"}),

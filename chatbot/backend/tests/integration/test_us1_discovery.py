@@ -392,6 +392,24 @@ def test_faq_override_never_fires_while_a_pending_action_awaits_confirmation(
     assert spy.last_context is not None  # reached the LLM, not the deterministic FAQ override
 
 
+def test_faq_override_never_hijacks_an_actual_checkout_request(
+    adapter: MockAdapter, session_store: SessionStore
+) -> None:
+    """Regression test for a real, confirmed live bug caught in a live end-to-end browser
+    test: the payment FAQ topic group used to include "checkout" as a synonym, so "ok let's
+    checkout" scored a topic overlap against a "Secure payment" FAQ entry (its own title
+    contains "payment"/"secure") and got hijacked into reciting that FAQ's answer instead of
+    ever being classified as request_checkout — the shopper's cart got stuck at the exact
+    moment they tried to complete it."""
+    adapter.set_faqs([FaqEntry(question="Secure payment", answer="We accept Visa/Mastercard/Paypal.")])
+    spy = _ContextCapturingLLMClient(ActionCall(action_type="request_checkout"))
+    ctx = _ctx(adapter, spy, session_store)
+
+    handle_turn(ctx, "s9i", "ok let's checkout")
+
+    assert spy.last_context is not None  # reached the LLM, not the deterministic FAQ override
+
+
 def test_llm_context_omits_store_faqs_for_a_message_unrelated_to_policy(
     adapter: MockAdapter, session_store: SessionStore
 ) -> None:
